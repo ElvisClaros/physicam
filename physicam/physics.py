@@ -558,11 +558,37 @@ _DISPATCH = {
 }
 
 
+def _metric_track_and_calib(track: Track, calib: Calibration):
+    """Return (metric Track in metres, identity Calibration) for per-frame calib."""
+    X, Y = calib.to_metric(track)
+    metric = Track(id=track.id, label=track.label, frames=np.asarray(track.frames),
+                   t=np.asarray(track.t, dtype=float), x=X, y=Y,
+                   area=np.asarray(track.area, dtype=float), bbox=np.asarray(track.bbox, dtype=float),
+                   conf=np.asarray(track.conf, dtype=float),
+                   eq_diameter=np.asarray(track.eq_diameter, dtype=float),
+                   contours=dict(track.contours), fps=track.fps)
+    identity = Calibration(m_per_px=1.0, rel_uncertainty=calib.rel_uncertainty,
+                           method=calib.method, details=calib.details)
+    return metric, identity
+
+
 def fit_model(track: Track, model: str, calib: Calibration | None = None,
               t_range=None, options: dict | None = None) -> Fit:
-    """Fit *model* to *track* and return a Fit. Raises ValueError on bad model."""
+    """Fit *model* to *track* and return a Fit. Raises ValueError on bad model.
+
+    When *calib* is per-frame (perspective-corrected), positions are first
+    converted to metric lateral coordinates ``X=(x-cx)s(t)``, ``Y=(y-cy)s(t)``
+    and the fit runs in metres with an identity scale.
+    """
     key = model.lower().strip()
     if key not in _DISPATCH:
         raise ValueError(f"unknown model {model!r}; choose from {sorted(_DISPATCH)}")
+    if calib is not None and getattr(calib, "kind", "constant") == "per_frame":
+        metric, identity = _metric_track_and_calib(track, calib)
+        fit = _DISPATCH[key](metric, identity, t_range, options)
+        fit.warnings = list(fit.warnings) + [
+            "per-frame perspective correction applied: fit in metric lateral coordinates X=(x-cx)s(t), Y=(y-cy)s(t); rmse is in metres"]
+        # rmse_px now holds metres; keep field for contract compatibility.
+        return fit
     fit = _DISPATCH[key](track, calib, t_range, options)
     return fit

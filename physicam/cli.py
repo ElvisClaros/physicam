@@ -83,6 +83,34 @@ def _cmd_fit(args) -> int:
     return 0
 
 
+def _cmd_analyze(args) -> int:
+    import hashlib
+    from physicam.pipeline import run_job
+
+    facts = json.loads(args.facts) if args.facts else {}
+    if args.job_dir:
+        job_dir = Path(args.job_dir)
+    else:
+        digest = hashlib.sha256((str(Path(args.video).resolve()) + args.question).encode()).hexdigest()[:12]
+        job_dir = Path("data/jobs") / digest
+
+    def emit(ev: dict) -> None:
+        print(json.dumps(ev)[:2000], flush=True)
+
+    result = run_job(job_dir, args.video, args.question, facts, emit=emit)
+    ans = result.get("answer") or {}
+    print(f"answer: {ans.get('headline', '(none)')}")
+    print(f"report: {job_dir / 'report.md'}")
+    print(f"result: {job_dir / 'result.json'}")
+    return 0 if result.get("status") == "done" else 1
+
+
+def _cmd_serve(args) -> int:
+    import uvicorn
+    uvicorn.run("physicam.server:app", host=args.host, port=args.port)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="physicam", description="Physics measurement from phone video")
     sub = p.add_subparsers(dest="command", required=True)
@@ -106,6 +134,18 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--t1", type=float, default=None)
     pf.add_argument("--m-per-px", type=float, default=1.0)
     pf.set_defaults(func=_cmd_fit)
+
+    pa = sub.add_parser("analyze", help="run the full pipeline on a video")
+    pa.add_argument("video")
+    pa.add_argument("question")
+    pa.add_argument("--facts", default=None, help="JSON string of facts")
+    pa.add_argument("--job-dir", default=None)
+    pa.set_defaults(func=_cmd_analyze)
+
+    ps = sub.add_parser("serve", help="serve the web UI + API")
+    ps.add_argument("--host", default="127.0.0.1")
+    ps.add_argument("--port", type=int, default=8000)
+    ps.set_defaults(func=_cmd_serve)
     return p
 
 

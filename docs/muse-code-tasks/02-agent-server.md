@@ -134,3 +134,26 @@ server and check that `/`, `/api/jobs/<id>`, the SSE stream and `/media/...` wor
 
 Finish with a summary: the files, the agent's actual tool sequence on the real clip, the answer it
 produced, the costs, and any problems you could not solve.
+
+## 10. Addition: perspective-corrected calibration (an important technical feature)
+Task 01's validation found that the bounce clip's per-flight g values disagree by 5.7%. The cause is
+perspective: the ball's apparent diameter grows 44.5 → 46.6 px as it moves toward the camera. Fix
+this in a principled way.
+
+`calibrate.from_track_size(track, real_diameter_m, per_frame=True)` produces a **time-varying
+scale**:
+- s(t) = D_real / d_px(t), where d_px(t) is the apparent diameter smoothed with a robust low-order
+  fit over time (masks are noisy; motion blur inflates area). Use the equivalent diameter from mask
+  area, or better the minor axis, which is less affected by motion blur along the direction of
+  travel.
+- Convert positions to metric lateral coordinates about the principal point (the image center):
+  X(t) = (x(t) − cx)·s(t) and Y(t) = (y(t) − cy)·s(t). Under a pinhole camera this is exact for the
+  lateral position, because Z ∝ 1/d_px.
+- Optionally expose the relative depth Z(t)/Z0 = d0/d_px(t). The UI can show it later.
+
+Physics fits then run on metric coordinates when a per-frame calibration is active. Add
+`Calibration.kind = "constant" | "per_frame"` and keep the API backward compatible. Re-run the bounce
+validation both ways and report the per-segment g spread with and without the correction. Assume a
+plausible diameter (the actual ball size is unknown); the *consistency* between segments is the
+metric to report. The agent tool `calibrate_from_track` gets a `per_frame` boolean (default true
+when the apparent size varies by more than 3%).

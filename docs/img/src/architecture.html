@@ -1,0 +1,77 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Physicam architecture</title>
+<style>
+  :root { --bg:#0b1020; --panel:#121a30; --line:#24304f; --text:#e6ecff; --muted:#8fa0c8;
+          --spark:#22d3ee; --sam:#34d399; --wonder:#fbbf24; --voice:#a78bfa; --local:#94a3b8; }
+  * { box-sizing:border-box; margin:0; }
+  body { width:1920px; height:1080px; background:radial-gradient(1200px 700px at 70% 10%, #16223f 0%, var(--bg) 60%);
+         color:var(--text); font:500 22px/1.35 Inter, "Segoe UI", system-ui, sans-serif; padding:64px 80px; }
+  h1 { font-size:54px; letter-spacing:-0.02em; }
+  h1 span { color:var(--spark); }
+  .sub { color:var(--muted); font-size:26px; margin-top:8px; }
+  .flow { display:grid; grid-template-columns: 1fr 70px 1fr 70px 1.25fr 70px 1fr; align-items:stretch; margin-top:70px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:26px 26px 24px; position:relative; }
+  .card h3 { font-size:27px; margin:14px 0 10px; }
+  .card p { color:var(--muted); font-size:20px; }
+  .badge { display:inline-block; font:700 15px/1 ui-monospace, "JetBrains Mono", monospace; letter-spacing:.06em;
+           padding:7px 10px; border-radius:8px; border:1px solid currentColor; }
+  .spark{color:var(--spark)} .sam{color:var(--sam)} .wonder{color:var(--wonder)} .voice{color:var(--voice)} .local{color:var(--local)}
+  .arrow { display:flex; align-items:center; justify-content:center; }
+  .arrow svg { width:60px; height:30px; }
+  .tools { margin-top:14px; display:flex; flex-wrap:wrap; gap:8px; }
+  .tool { font:600 15px/1 ui-monospace, monospace; padding:7px 9px; border-radius:7px; background:#0d1428; border:1px solid var(--line); color:#c8d3f5; }
+  .tool.sam { color:var(--sam); border-color:#1f5b4a; } .tool.spark{ color:var(--spark); border-color:#1b5566; }
+  .out { margin-top:56px; display:grid; grid-template-columns: repeat(5, 1fr); gap:22px; }
+  .o { background:#0f1730; border:1px dashed var(--line); border-radius:14px; padding:18px 20px; }
+  .o b { display:block; font-size:22px; margin-bottom:4px; }
+  .o span { color:var(--muted); font-size:18px; }
+  .foot { position:absolute; left:80px; right:80px; bottom:48px; display:flex; justify-content:space-between; color:var(--muted); font-size:19px; }
+  .q { font-style:italic; color:#c8d3f5; }
+</style></head>
+<body>
+  <h1>How <span>Physicam</span> works</h1>
+  <div class="sub">A phone video plus a question becomes a measurement with error bars. Every number comes from a tool, never from the model's imagination.</div>
+
+  <div class="flow">
+    <div class="card">
+      <span class="badge voice">MUSE VOICE</span>
+      <h3>Video + question</h3>
+      <p>Upload a clip (60–240 fps) and ask in plain language, typed or spoken:</p>
+      <p class="q" style="margin-top:10px">“What's the coefficient of restitution?”</p>
+    </div>
+    <div class="arrow"><svg viewBox="0 0 60 30"><path d="M2 15h50M42 5l12 10-12 10" stroke="#5b6b95" stroke-width="3" fill="none"/></svg></div>
+    <div class="card">
+      <span class="badge spark">MUSE SPARK · VIDEO</span>
+      <h3>Watch &amp; plan</h3>
+      <p>Spark watches the clip <i>with audio</i>. It identifies the phenomenon, the objects to track (as SAM prompts) and reference objects of known size, and hears spoken facts (“the string is 80 cm”).</p>
+    </div>
+    <div class="arrow"><svg viewBox="0 0 60 30"><path d="M2 15h50M42 5l12 10-12 10" stroke="#5b6b95" stroke-width="3" fill="none"/></svg></div>
+    <div class="card">
+      <span class="badge spark">MUSE SPARK · AGENT</span> <span class="badge sam">SAM 3.1</span>
+      <h3>Measure like a physicist</h3>
+      <p>A tool-calling loop tracks, calibrates, fits, checks the residuals and refits:</p>
+      <div class="tools">
+        <span class="tool sam">track_objects</span><span class="tool sam">calibrate_reference</span>
+        <span class="tool">calibrate_from_track</span><span class="tool">calibrate_from_gravity</span>
+        <span class="tool">fit_model</span><span class="tool spark">inspect_frames</span>
+        <span class="tool">run_python</span><span class="tool">finish</span>
+      </div>
+    </div>
+    <div class="arrow"><svg viewBox="0 0 60 30"><path d="M2 15h50M42 5l12 10-12 10" stroke="#5b6b95" stroke-width="3" fill="none"/></svg></div>
+    <div class="card">
+      <span class="badge wonder">MUSE WONDER</span>
+      <h3>Lab report</h3>
+      <p>Method, results table, comparison with accepted values, dominant error sources, and how to measure better next time.</p>
+    </div>
+  </div>
+
+  <div class="out">
+    <div class="o"><b>Sub-pixel tracks</b><span>Mask-weighted centroids from SAM 3.1 pixel masks, stitched across id changes</span></div>
+    <div class="o"><b>Perspective-aware scale</b><span>Per-frame calibration from the object's apparent size</span></div>
+    <div class="o"><b>Physics models</b><span>Projectile · bounce · pendulum · spring · constant velocity</span></div>
+    <div class="o"><b>Honest uncertainty</b><span>Fit covariance ⊕ calibration error, outlier rejection, residual diagnostics</span></div>
+    <div class="o"><b>Strobe photo</b><span>A stroboscopic composite built from the masks</span></div>
+  </div>
+
+  <div class="foot"><span>Built with Muse Code · Meta Model API · official meta-sam-parser</span><span>github.com/ElvisClaros/physicam</span></div>
+</body></html>
