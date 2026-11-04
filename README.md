@@ -2,7 +2,13 @@
 
 **Film anything that moves. Ask a question. Get a measurement with error bars.**
 
-![Physicam hero](docs/img/hero.png)
+![Physicam: live run on a real 240 fps clip, with SAM 3.1 mask, fading trail, fitted parabolas and impacts](docs/img/hero.png)
+
+| Result with honest uncertainty | Stroboscopic composite from SAM masks |
+| --- | --- |
+| ![results](docs/img/results.png) | ![strobe](docs/img/strobe_view.png) |
+
+![How Physicam works](docs/img/architecture.png)
 
 ## Why
 
