@@ -7,7 +7,7 @@
   "subtitle": "Coefficient of restitution + g (pixel units, no ruler in frame)",
   "question": "What is the coefficient of restitution of this ball, and what does the throw tell us about g?",
   "thumb_url": "/api/jobs/bouncy-ball-240fps/thumb.jpg",
-  "headline": "e = 0.697; throw phase is powered, not free fall"
+  "headline": "e = 0.70 \u00b1 0.12; g = 4757 \u00b1 336 px/s\u00b2 (no scale)"
  },
  {
   "id": "elastic-pendulum",
@@ -17,6 +17,6 @@
   "subtitle": "Oscillation period of a mass on a spring (portrait phone video)",
   "question": "What is the oscillation period of this spring pendulum?",
   "thumb_url": "/api/jobs/elastic-pendulum/thumb.jpg",
-  "headline": "Oscillation period \u2248 0.963 s"
+  "headline": "Period \u2248 0.964 s"
  }
 ]

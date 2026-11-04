@@ -144,6 +144,14 @@ button,input,textarea,select{font:inherit;color:inherit}
 .track-legend{display:flex;gap:8px;flex-wrap:wrap;font-size:12.5px}
 .legend-item{display:flex;gap:6px;align-items:center;border:1px solid var(--border-soft);border-radius:999px;padding:3px 10px;background:var(--panel2)}
 .legend-dot{width:10px;height:10px;border-radius:50%}
+.legend-chip{font:inherit;color:inherit;cursor:pointer}
+.legend-chip.off{opacity:.45}
+.legend-chip.on{opacity:1;border-color:var(--accent)}
+.aux-chip .legend-dot{opacity:.6}
+.diagnostics{margin-top:8px}
+.diagnostics-title{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin-bottom:2px}
+table.diagnostics-table{font-size:12px;color:var(--muted)}
+table.diagnostics-table th,table.diagnostics-table td{padding:4px 8px}
 
 /* timeline */
 .timeline{display:flex;flex-direction:column;gap:7px;max-height:640px;overflow:auto;padding-right:2px}

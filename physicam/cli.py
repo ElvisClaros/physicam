@@ -105,6 +105,44 @@ def _cmd_analyze(args) -> int:
     return 0 if result.get("status") == "done" else 1
 
 
+def _cmd_rereport(args) -> int:
+    """Rewrite report_markdown/report.md for an existing job dir (no pipeline re-run)."""
+    job_dir = Path(args.job_dir)
+    result_path = job_dir / "result.json"
+    if not result_path.exists():
+        print(f"no result.json in {job_dir}", file=sys.stderr)
+        return 2
+    result = json.loads(result_path.read_text())
+    from physicam.report import _round_long_decimals, _template_report, write_report
+
+    client = None
+    try:
+        from physicam.meta_client import MetaClient
+
+        client = MetaClient()
+    except Exception:
+        client = None
+    try:
+        report_md = write_report(client, result) if client is not None else ""
+    except Exception:
+        report_md = ""
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+    if not report_md:
+        report_md = _round_long_decimals(_template_report(result))
+    result["report_markdown"] = report_md
+    tmp = job_dir / "result.json.tmp"
+    tmp.write_text(json.dumps(result, indent=1))
+    tmp.replace(result_path)
+    (job_dir / "report.md").write_text(report_md)
+    print(f"rereported {job_dir} ({len(report_md)} chars)")
+    return 0
+
+
 def _cmd_serve(args) -> int:
     import uvicorn
     uvicorn.run("physicam.server:app", host=args.host, port=args.port)
@@ -141,6 +179,10 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--facts", default=None, help="JSON string of facts")
     pa.add_argument("--job-dir", default=None)
     pa.set_defaults(func=_cmd_analyze)
+
+    pr = sub.add_parser("rereport", help="rewrite the lab report for an existing job dir")
+    pr.add_argument("job_dir")
+    pr.set_defaults(func=_cmd_rereport)
 
     ps = sub.add_parser("serve", help="serve the web UI + API")
     ps.add_argument("--host", default="127.0.0.1")

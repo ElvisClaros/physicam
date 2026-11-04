@@ -27,6 +27,7 @@ const state = {
   strobeUrl: null,
   stageMode: "video",   // "video" | "strobe"
   currentStage: null,
+  auxTracksVisible: new Set(), // auxiliary track ids toggled on via legend chips
 };
 
 function emptyResult() {
@@ -57,6 +58,66 @@ function fmtParam(p) {
   if (!p || p.value == null || !isFinite(p.value)) return "—";
   if (p.stderr == null || !isFinite(p.stderr) || p.stderr === 0) return `${fmt(p.value, 5)} ± —`;
   return fmtPair(p.value, p.stderr);
+}
+/** Format a number with 4 significant digits. */
+function fmtSig(n) {
+  if (n == null || !isFinite(n)) return "—";
+  return Number(n).toPrecision(4);
+}
+/** Format an info value: 4 sig digits, arrays comma-separated. */
+function formatInfoValue(v) {
+  if (v == null) return "—";
+  if (Array.isArray(v)) return v.map((x) => (typeof x === "number" ? fmtSig(x) : String(x))).join(", ");
+  if (typeof v === "number") return fmtSig(v);
+  if (typeof v === "boolean") return v ? "true" : "false";
+  if (typeof v === "object") {
+    return Object.entries(v).map(([k, x]) => `${k}=${formatInfoValue(x)}`).join(", ");
+  }
+  return String(v);
+}
+const INFO_LABELS = {
+  T_halves: "Half-window periods",
+  sigma_stat: "σ stat",
+  sigma_sys: "σ sys",
+  chi2_red: "χ²ᵣ",
+  inflation_factor: "inflation",
+  pivot_px: "pivot (px)",
+  L_px: "L (px)",
+  L_px_stderr: "L stderr (px)",
+  L_m: "L (m)",
+  axis: "axis",
+  method_g: "g method",
+  dominant_error: "dominant error",
+  finite_amplitude_correction: "finite-amplitude correction",
+  theta_fit: "θ fit",
+  length_source: "length source",
+  arc_span_deg: "arc span (°)",
+  predicted_length_m: "predicted length (m)",
+  predicted_length_for_g_m: "predicted length for g (m)",
+};
+function infoLabel(key) { return INFO_LABELS[key] || key.replace(/_/g, " "); }
+
+/* ---------------- track visibility ---------------- */
+
+/** Ids of tracks referenced by at least one fit. */
+function fitTrackIds() {
+  return new Set((state.fits || []).map((f) => f.track_id).filter(Boolean));
+}
+function trackFrameCount(track) {
+  return (track?.t?.length ?? track?.frames?.length ?? 0);
+}
+function isFitTrack(track) { return fitTrackIds().has(track?.id); }
+/** Auxiliary: not referenced by any fit. */
+function isAuxTrack(track) { return !isFitTrack(track); }
+/** Tracks with fewer than 15 frames are hidden entirely unless fit-referenced. */
+function isHiddenShortTrack(track) {
+  return trackFrameCount(track) < 15 && !isFitTrack(track);
+}
+function isTrackVisible(track) {
+  if (!track) return false;
+  if (isHiddenShortTrack(track)) return false;
+  if (isAuxTrack(track)) return state.auxTracksVisible.has(track.id);
+  return true;
 }
 function esc(s) {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -430,12 +491,14 @@ function fitBlockHtml(fit) {
     const rows = Object.entries(fit.params || {}).map(([name, p]) =>
       `<tr><td>${esc(name)}</td><td class="num">${esc(fmtParam(p))}${metricNote(p)}</td>` +
       `<td>${esc(p.unit || "")}</td></tr>`).join("");
-    const info = Object.entries(fit.info || {}).map(([k, v]) =>
-      `<tr><td>${esc(k)}</td><td class="num">${esc(String(v))}</td><td></td></tr>`).join("");
+    const infoRows = Object.entries(fit.info || {}).map(([k, v]) =>
+      `<tr><td>${esc(infoLabel(k))}</td><td class="num">${esc(formatInfoValue(v))}</td><td></td></tr>`).join("");
     const warnings = (fit.warnings || []).map((w) => `<span class="warn-chip">${esc(w)}</span>`).join("");
     return `<div class="fit-title">${esc(fit.id || "")} · ${esc(fit.model || "")} · track ${esc(fit.track_id || "")}` +
       ` · R² = ${fmt(fit.r2, 4)} · RMSE = ${fmt(fit.rmse_px, 3)} px · n = ${fit.n_points ?? "—"}</div>` +
-      ((rows || info) ? `<table class="params"><thead><tr><th>Parameter</th><th>Value ± stderr</th><th>Unit</th></tr></thead><tbody>${rows}${info}</tbody></table>` : "") +
+      (rows ? `<table class="params"><thead><tr><th>Parameter</th><th>Value ± stderr</th><th>Unit</th></tr></thead><tbody>${rows}</tbody></table>` : "") +
+      (infoRows ? `<div class="diagnostics"><div class="diagnostics-title">diagnostics</div>` +
+        `<table class="params diagnostics-table"><tbody>${infoRows}</tbody></table></div>` : "") +
       (warnings ? `<div>${warnings}</div>` : "");
   } catch { return `<div class="fit-title">${esc(fit.id || "fit")} (could not render)</div>`; }
 }
@@ -494,9 +557,32 @@ function renderLegend() {
   box.innerHTML = "";
   let i = 0;
   for (const track of state.tracks.values()) {
+    const color = trackColor(track, i);
+    if (isHiddenShortTrack(track)) { i++; continue; }
+    if (isAuxTrack(track)) {
+      // Auxiliary tracks: toggleable chips, off by default.
+      const chip = document.createElement("button");
+      chip.type = "button";
+      const on = state.auxTracksVisible.has(track.id);
+      chip.className = `legend-item legend-chip aux-chip${on ? " on" : " off"}`;
+      chip.dataset.trackId = track.id;
+      chip.setAttribute("aria-pressed", on ? "true" : "false");
+      chip.title = on ? "Hide auxiliary track" : "Show auxiliary track";
+      chip.innerHTML = `<span class="legend-dot" style="background:${esc(color)}"></span>${esc(track.label || track.id)}`;
+      chip.addEventListener("click", () => {
+        if (state.auxTracksVisible.has(track.id)) state.auxTracksVisible.delete(track.id);
+        else state.auxTracksVisible.add(track.id);
+        renderLegend();
+        renderCharts();
+        drawOverlay();
+      });
+      box.appendChild(chip);
+      i++;
+      continue;
+    }
     const item = document.createElement("span");
     item.className = "legend-item";
-    item.innerHTML = `<span class="legend-dot" style="background:${esc(trackColor(track, i))}"></span>${esc(track.label || track.id)}`;
+    item.innerHTML = `<span class="legend-dot" style="background:${esc(color)}"></span>${esc(track.label || track.id)}`;
     box.appendChild(item);
     i++;
   }
@@ -581,6 +667,7 @@ function renderCharts(cursorT = null) {
   const heightOf = new Map(); // track.id -> {data, fromPx, label unit}
   let idx = 0;
   for (const track of state.tracks.values()) {
+    if (!isTrackVisible(track)) { idx++; continue; }
     const color = trackColor(track, idx++);
     const perFrame = isPerFrame(track);
     if (perFrame) anyPerFrame = true;
@@ -736,13 +823,25 @@ function drawOverlay() {
   const frame = Math.round(tNow * fps);
   const showMasks = $("tog-masks").checked, showTrail = $("tog-trail").checked, showFit = $("tog-fit").checked;
   let hudTrack = null, hudIndex = -1;
+  // Clip duration decides whether the fitted ghost is windowed (±1.5 s).
+  let clipDuration = Number(state.result?.video?.duration_s) || 0;
+  if (!clipDuration) {
+    for (const tr of state.tracks.values()) {
+      const tt = tr.t || [];
+      if (tt.length) clipDuration = Math.max(clipDuration, tt[tt.length - 1] - tt[0]);
+    }
+  }
+  const longClip = clipDuration > 4;
 
   let idx = 0;
   for (const track of state.tracks.values()) {
     const color = trackColor(track, idx++);
+    if (!isTrackVisible(track)) continue;
+    const aux = isAuxTrack(track);
+    const baseAlpha = aux ? 0.3 : 1;
     const i = nearestIndex(track, tNow);
     if (i < 0) continue;
-    if (hudTrack === null) { hudTrack = track; hudIndex = i; }
+    if (hudTrack === null || (isAuxTrack(hudTrack) && !aux)) { hudTrack = track; hudIndex = i; }
     const PX = (x) => geo.ox + x * geo.scale;
     const PY = (y) => geo.oy + y * geo.scale;
 
@@ -758,11 +857,14 @@ function drawOverlay() {
           : (fit.curve ? [fit.curve] : []);
         for (const c of curves) {
           if (!c || !c.t) continue;
+          // Ghost curve: ±1.5 s around now on long clips, full on short clips.
           ctx.beginPath();
+          let pen = false;
           c.t.forEach((tt, k) => {
+            if (longClip && (tt < tNow - 1.5 || tt > tNow + 1.5)) { pen = false; return; }
             const px = PX(c.x && c.x[k] != null ? c.x[k] : trackPosAt(track, tt, "x"));
             const py = PY(c.y && c.y[k] != null ? c.y[k] : trackPosAt(track, tt, "y"));
-            k ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+            if (pen) ctx.lineTo(px, py); else { ctx.moveTo(px, py); pen = true; }
           });
           ctx.stroke();
         }
@@ -784,10 +886,18 @@ function drawOverlay() {
     }
 
     if (showTrail && i > 0) {
-      const lookback = Math.min(i, Math.round(fps * 1.2));
-      for (let k = Math.max(0, i - lookback); k < i; k++) {
-        const a = 0.08 + 0.6 * (k - (i - lookback)) / Math.max(1, lookback);
-        ctx.strokeStyle = color; ctx.globalAlpha = a; ctx.lineWidth = 2;
+      // Last 1.0 s of trail only, capped at 240 points, fading in opacity/width.
+      const TRAIL_SECONDS = 1.0, TRAIL_MAX_POINTS = 240;
+      let start = i;
+      while (start > 0 && (track.t[i] - track.t[start - 1]) <= TRAIL_SECONDS
+             && (i - (start - 1)) < TRAIL_MAX_POINTS) start--;
+      // start is the first index inside the 1.0 s / 240-point window.
+      const span = Math.max(1, i - start);
+      for (let k = start; k < i; k++) {
+        const frac = (k - start) / span; // 0 oldest -> 1 newest
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = baseAlpha * (0.08 + 0.62 * frac);
+        ctx.lineWidth = 0.7 + 1.8 * frac;
         ctx.beginPath();
         ctx.moveTo(PX(track.x[k]), PY(track.y[k]));
         ctx.lineTo(PX(track.x[k + 1]), PY(track.y[k + 1]));
@@ -803,16 +913,20 @@ function drawOverlay() {
         ctx.translate(geo.ox, geo.oy);
         ctx.scale(geo.scale, geo.scale);
         const path = new Path2D(d);
-        ctx.fillStyle = color; ctx.globalAlpha = 0.28; ctx.fill(path);
-        ctx.globalAlpha = 1; ctx.strokeStyle = color; ctx.lineWidth = 1.6 / geo.scale; ctx.stroke(path);
+        ctx.fillStyle = color; ctx.globalAlpha = 0.28 * baseAlpha; ctx.fill(path);
+        ctx.globalAlpha = baseAlpha; ctx.strokeStyle = color; ctx.lineWidth = 1.6 / geo.scale; ctx.stroke(path);
         ctx.restore();
       } catch { /* malformed path: skip this frame */ }
     }
 
-    // centroid + label
+    // centroid (+ label only for fit-referenced tracks; aux tracks are label-free)
     const cx = PX(track.x[i]), cy = PY(track.y[i]);
+    ctx.save();
+    ctx.globalAlpha = baseAlpha;
     ctx.fillStyle = color;
     ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    if (aux) continue;
     ctx.font = "12px sans-serif";
     const label = track.label || track.id;
     const wText = ctx.measureText(label).width;
@@ -882,6 +996,7 @@ function startSync() {
 
 function resetJob() {
   state.tracks.clear();
+  state.auxTracksVisible.clear();
   state.fits = [];
   state.result = emptyResult();
   state.strobeUrl = null;
@@ -926,6 +1041,7 @@ function applyFit(fit) {
   const i = state.fits.findIndex((f) => f.id === fit.id);
   if (i >= 0) state.fits[i] = fit; else state.fits.push(fit);
   state.result.fits = state.fits;
+  renderLegend();
   renderFits();
   renderCharts();
   if (state.result.answer) renderAnswer(state.result.answer, false);
@@ -936,6 +1052,7 @@ function applyResult(result, { animateAnswer = false } = {}) {
   if (!result) return;
   state.result = { ...emptyResult(), ...result };
   state.jobId = result.id || state.jobId;
+  state.auxTracksVisible.clear();
   state.tracks.clear();
   for (const tr of (result.tracks || [])) state.tracks.set(tr.id, tr);
   state.fits = result.fits || [];
@@ -971,6 +1088,24 @@ async function loadJob(id) {
   const result = await res.json();
   applyResult(result);
   return result;
+}
+
+/** Job id from `#job=<id>`, or null. */
+function jobIdFromHash() {
+  return new URLSearchParams(location.hash.replace(/^#/, "")).get("job");
+}
+
+async function loadJobFromHash() {
+  const jobId = jobIdFromHash();
+  if (!jobId) return;
+  if (jobId === state.jobId && state.result?.id === jobId && state.tracks.size) return;
+  state.jobId = jobId;
+  try {
+    resetJob();
+    state.jobId = jobId;
+    await loadJob(jobId);
+    setStatus("Job loaded.");
+  } catch (err) { showError(err.message || String(err)); }
 }
 
 function handleEvent(ev) {
@@ -1204,7 +1339,13 @@ function renderExamples(list) {
       try {
         if (state.staticMode && ex.events_url) await replayStaticExample(ex);
         else if (MOCK) await loadMockInstant();
-        else if (ex.job_id) { resetJob(); await loadJob(ex.job_id); setStatus("Example loaded."); }
+        else if (ex.job_id) {
+          // Update the hash; the hashchange listener loads the job. If the
+          // hash is already that job, no event fires, so load directly.
+          const target = `#job=${encodeURIComponent(ex.job_id)}`;
+          if (location.hash === target) { resetJob(); await loadJob(ex.job_id); setStatus("Example loaded."); }
+          else location.hash = target;
+        }
       } catch (err) { showError(err.message || String(err)); }
     });
     box.appendChild(btn);
@@ -1374,13 +1515,8 @@ async function init() {
     setVideoSource("mock/clip.mp4");
     return;
   }
-  const hash = new URLSearchParams(location.hash.replace(/^#/, ""));
-  const jobId = hash.get("job");
-  if (jobId) {
-    state.jobId = jobId;
-    try { await loadJob(jobId); setStatus("Job loaded."); }
-    catch (err) { showError(err.message || String(err)); }
-  }
+  window.addEventListener("hashchange", () => { loadJobFromHash(); });
+  await loadJobFromHash();
 }
 
 init().catch((err) => showError(err.message || String(err)));

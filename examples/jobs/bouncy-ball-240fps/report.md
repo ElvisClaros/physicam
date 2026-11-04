@@ -1,31 +1,37 @@
 ## Question
+
 What is the coefficient of restitution of this ball, and what does the throw tell us about g?
 
 ## What Physicam saw
-A boy throws a small red ball across a tiled room and it bounces multiple times on the floor. The video is 1280 × 720 px, 240.0 fps, 4.0 s and 960 frames, with a time window of 0.0–3.5 s. Tracking the red ball gave track t0 over 0.0–3.995833 s and 863 frames. Quality issues were backlit conditions, a dark foreground silhouette and low contrast on the target, although the camera was static.
+
+A small red ball was thrown across a tiled room and bounced repeatedly on the floor. The video lasted 4.000 s at 240.0 fps, with a frame size of 1280 by 720. The camera was static. The scene was backlit, with a dark foreground silhouette and low contrast on the target, making the ball difficult to distinguish in some frames.
 
 ## Method
-Physicam fitted a bounce model to the vertical ball trajectory, splitting it at impacts into free-flight segments. Calibration was none, with m_per_px = 1.0 and rel_uncertainty = 0.0, so lengths and accelerations remain in pixel units. Segment fits with poor behaviour or unphysical restitution were excluded from the pooled result. Fit f0 used the full t0 track; f1 repeated the analysis using free flight only, from 0.3333333333333333–3.9875 s.
+
+Physicam tracked the red ball using the prompts “red ball”, “small ball”, and “red sphere”. The track used for the reported fit, t2, contained 862 frames spanning 0.000 s to 3.996 s. A bounce model was fitted to the vertical motion over 0.333 s to 3.996 s, identifying impacts and estimating the vertical acceleration and coefficient of restitution for each usable impact. No reference object or known size was available, so no length calibration could be performed. Consequently, distances, velocities, and acceleration are reported in pixels, pixel-based velocity units, and px/s² rather than SI units.
 
 ## Results
-| Quantity | Fit | Value |
-|---|---|---|
-| Coefficient of restitution, e | f0 | 0.6976269806104375 ± 0.004184273402523289 |
-| Coefficient of restitution, e | f1 | 0.696813671342044 ± 0.0041847836812585896 |
-| Pooled g | f0 | 4691.602576479591 ± 13.888652268640655 px/s² |
-| Pooled g | f1 | 4694.606705794758 ± 13.893007364701203 px/s² |
-| R² | f0 | 0.9971087360480302 |
-| R² | f1 | 0.9958761287302011 |
-| RMSE | f0 | 30.971483206324308 px |
-| RMSE | f1 | 32.01353363838601 px |
-| Valid impact time | f0/f1 | 1.5375 s |
 
-The headline result is e = 0.6976 ± 0.0042, dimensionless, so no metric scale is required.
+| Quantity | Result |
+|---|---:|
+| Valid impacts used | 2.000 |
+| Points in fit | 782.0 |
+| Fit $R^2$ | 0.9959 |
+| Fit RMSE | 32.42 px |
+| Coefficient of restitution, $e$ | $0.70 \pm 0.12$ |
+| Height-based $e$ at valid impact | 0.8294 |
+| Vertical acceleration, $g$ | $4760 \pm 340\ \mathrm{px/s^2}$ |
+| Segment $g$, first pooled segment | $4550 \pm 730\ \mathrm{px/s^2}$ |
+| Segment $g$, second pooled segment | $4810 \pm 380\ \mathrm{px/s^2}$ |
+
+The valid restitution measurement occurred at 1.538 s, with velocities before and after impact of 3189 px/s and −2222 px/s, respectively. Another impact at 2.471 s gave $e = 0.25 \pm 0.42$, but it was marked invalid and excluded from the headline result.
 
 ## Discussion
-No accepted metric value can be compared directly: accepted g is in m/s², whereas this uncalibrated result is only in px/s², and no accepted e for this ball is supplied. Internally, f0 and f1 agree closely for both e and g, supporting the valid impact at 1.5375 s. The impact at 0.325 s gave e = 2.3144670128263884, flagged as unphysical because e > 1, and its neighbouring segment was excluded. The later impact at 2.470833333333333 s was also invalid because velocity-e and height-e disagreed by >0.15.
 
-The throw tells us nothing reliable about g. Its segment fitted g = -2343.983568798512 ± 211.15729443366214 px/s² and was excluded, consistent with a powered throw rather than free fall. Dominant errors are perspective, segment-boundary placement and poor tracking near impacts, reflected in the warning that the per-segment g range was 5.8% > 5%. Despite high R², RMSE around 30.971483206324308–32.01353363838601 px shows substantial pixel residuals, so the formal uncertainties probably underestimate systematic error.
+The headline result is $e = 0.70 \pm 0.12$, indicating a moderately bouncy collision, while $g = 4760 \pm 340\ \mathrm{px/s^2}$ cannot be compared with an accepted SI value because the pixel scale is unknown. The high $R^2$ shows that the bounce model captures the overall trajectory, but the RMSE of 32.42 px shows substantial scatter around the fitted path. The velocity-based and height-based restitution estimates also disagree by more than the stated reliability threshold, which weakens confidence in the detailed bounce behaviour.
+
+The dominant error sources are likely poor target visibility from backlighting and low contrast, uncertainty in segment boundaries near impacts, and changing perspective as the ball moves through the room. This is supported by the per-segment $g$ range of 5.6%, above the 5% warning level. The invalid late impact and excluded neighbouring flight further suggest that the later motion was tracked or segmented less reliably.
 
 ## How to measure better next time
-Place a known metric reference in the ball’s plane of motion, improve front lighting and contrast, and keep the trajectory perpendicular to the camera axis to reduce perspective changes. Use cleaner segment boundaries around impacts, exclude the powered throw by design, and retain only free-flight portions for estimating g.
+
+Film against a brighter, higher-contrast background and light the ball from the camera side. Place a clearly visible object of known length in the plane of motion to calibrate pixels to metres. Keep the ball’s motion as perpendicular to the camera view as possible, mark the floor contact line, and record a cleaner sequence with fewer occlusions so every bounce segment can be included.

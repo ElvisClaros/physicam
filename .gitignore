@@ -9,3 +9,4 @@ __pycache__/
 site/
 .venv/
 web/mock/*.mp4
+examples/jobs/*/proxy.mp4

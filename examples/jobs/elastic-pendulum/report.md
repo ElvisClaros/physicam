@@ -4,28 +4,26 @@ What is the oscillation period of this spring pendulum?
 
 ## What Physicam saw
 
-The video shows a small metal weight on a hanging coil spring swinging side-to-side as a spring pendulum. The recording is 720 × 1280 px, 30.0 fps, 504 frames, and 16.8 s long, with a static camera and motion blur noted. The main track, labelled “metal ball,” contains 491 frames from 0.433 to 16.767 s. A second “metal weight” track contains only 10 frames from 16.467 to 16.767 s and was not used for the reported fits.
+A small shiny metal bob/weight at the bottom of a hanging coil spring swinging side-to-side, with motion blur noted. The main track, t1 ("metal ball"), contains 491 frames from 0.433 s to 16.767 s. The video is 30.00 fps, 720 × 1280 px, and 16.800 s long.
 
 ## Method
 
-Physicam tracked the bob’s side-to-side position over time and fitted that motion with two models. A pendulum model was fitted over the full 0.433–16.767 s window. Because its geometry was unreliable, a damped oscillator model was also fitted to the same position–time data. That oscillator fit was repeated on the restricted 2.0–12.0 s window to check whether the period was stable. The period is determined from timing, so no spatial calibration was needed; the calibration method was “none.”
+The bob's horizontal position, x(t), was tracked over time. A pendulum fit (f0) and damped-sinusoid oscillator fits (f1, f2) were applied. Because the pendulum circle fit failed—pivot not above the bob and R² = 0.6896—the reported period uses the oscillator refit f2 over 2.000 s to 14.000 s. No spatial calibration was needed for a period measurement.
 
 ## Results
 
-| Fit | Window (s) | Points | Period (s) | R² | RMSE (px) |
-|---|---:|---:|---:|---:|---:|
-| Pendulum, f0 | 0.433–16.767 | 491 | 0.9648 ± 0.0010 | 0.690 | 221.92 |
-| Oscillator, f1 | 0.433–16.767 | 491 | 0.9633 ± 0.0003 | 0.965 | 22.81 |
-| Oscillator, f2 | 2.0–12.0 | 301 | 0.9638 ± 0.0005 | 0.968 | 22.80 |
+| Fit | Range (s) | Period (s) | R² | RMSE (px) |
+|---|---|---:|---:|---:|
+| f0 pendulum | 0.433–16.767 | 0.9648 ± 0.0058 | 0.6896 | 221.9 |
+| f1 oscillator | 0.433–16.767 | 0.9633 ± 0.0039 | 0.9653 | 22.81 |
+| f2 oscillator | 2.000–14.000 | 0.9638 ± 0.0036 | 0.9675 | 22.44 |
 
-The headline result is an oscillation period of approximately **0.963 ± 0.001 s**.
+Headline result: **period = 0.9638 ± 0.0036 s**. For f2, ω = 6.519 ± 0.025 rad/s, amplitude = 195 ± 30 px, and γ = 0.020 ± 0.023 1/s. Its split-half periods are 0.9623 s and 0.9645 s.
 
 ## Discussion
 
-No accepted reference period is provided, so the period cannot be compared with an accepted value. The value 9.81 was used only to derive a predicted pendulum length of 0.076 ± 0.011 m from the pendulum fit; this is not a measurement of $g$, and no length was measured independently.
-
-The oscillator fits agree closely, differing by only about 0.0005 s between the full and restricted windows, which supports a stable period. In contrast, the pendulum fit is poor and carries the warning that the circle-fit pivot is not above the bob, making its length unreliable. Motion blur is a likely tracking-error source. Although the oscillator RMSE of about 22.8 px is far below the pendulum value, its warning of “large residual structure” indicates remaining systematic mismatch, possibly from air drag, perspective, or the wrong model. Thus the formal period uncertainty may understate model-related uncertainty.
+There is no accepted reference period in the data to compare against. The pendulum fit also gives L_predicted = 0.076 ± 0.025 m, but this is only the length implied by assuming g = 9.81; g was not computed and this is not a measured length. Agreement among f0, f1, and f2 supports ~0.964 s, with f2 the cleanest. However, residuals say the simple damped sinusoid is incomplete: f2 has reduced chi-squared 69.19 and RMSE 22.44 px despite R² = 0.9675, with a warning of "large residual structure: maybe air drag, perspective, or wrong model." The pendulum fit's dominant error is listed as "period," and a spring pendulum swinging side-to-side need not behave as a simple pendulum. Motion blur is a likely tracking error source.
 
 ## How to measure better next time
 
-Reduce motion blur with better lighting or a faster exposure, keep the pivot visible and above the bob, and provide a measured pendulum length and spatial calibration so the geometry and $g$ can be checked independently. A cleaner, more planar swing and a repeat recording would also help separate true damping from tracking and perspective effects.
+Use a sharper, higher-contrast bob marker to reduce motion-blur tracking error; keep the camera perpendicular to the swing plane to reduce perspective; add a known length scale and a visible fixed pivot reference; and record a longer, steady oscillation so period, damping, and any spring-specific behaviour can be separated more cleanly.
