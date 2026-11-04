@@ -83,11 +83,16 @@ def _specs() -> list[dict]:
     return specs
 
 
-def main() -> None:
-    """Build every example and write examples.json."""
+def main(only: str | None = None) -> None:
+    """Build every example (or only slug *only*) and write examples.json."""
     JOBS.mkdir(parents=True, exist_ok=True)
     index = []
-    for spec in _specs():
+    specs = _specs()
+    if only:
+        specs = [s for s in specs if s["slug"] == only]
+        if not specs:
+            raise SystemExit(f"no example with slug {only!r}")
+    for spec in specs:
         slug, job_dir = spec["slug"], JOBS / spec["slug"]
         if job_dir.exists():
             shutil.rmtree(job_dir)
@@ -111,9 +116,24 @@ def main() -> None:
                       "subtitle": spec["subtitle"], "question": spec["question"],
                       "thumb_url": f"/api/jobs/{slug}/thumb.jpg",
                       "headline": ans.get("headline", "")})
+    if only:
+        # Preserve the other examples' entries when building just one.
+        existing_path = ROOT / "examples.json"
+        existing = []
+        if existing_path.exists():
+            try:
+                existing = [e for e in json.loads(existing_path.read_text())
+                            if e.get("slug") != only]
+            except Exception:
+                existing = []
+        index = existing + index
     (ROOT / "examples.json").write_text(json.dumps(index, indent=1))
     print(f"wrote examples/examples.json ({len(index)} examples)")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Build Physicam examples")
+    ap.add_argument("--only", default=None, help="build only this example slug")
+    main(only=ap.parse_args().only)

@@ -18,5 +18,15 @@
   "question": "What is the oscillation period of this spring pendulum?",
   "thumb_url": "/api/jobs/elastic-pendulum/thumb.jpg",
   "headline": "T = 0.963 \u00b1 0.006 s"
+ },
+ {
+  "id": "fiuba-draining-water",
+  "slug": "fiuba-draining-water",
+  "job_id": "fiuba-draining-water",
+  "title": "Draining jar \u00b7 Torricelli (FIUBA lab)",
+  "subtitle": "Real Modelaci\u00f3n Num\u00e9rica lab: 5 mm hole, 7.5 cm jar",
+  "question": "What is the discharge coefficient of the hole, and how long does the jar take to drain?",
+  "thumb_url": "/api/jobs/fiuba-draining-water/thumb.jpg",
+  "headline": "Cd = 0.56 \u00b1 0.03, drains in 46.2 \u00b1 0.9 s"
  }
 ]

@@ -1,0 +1,10 @@
+{
+  "title": "Draining jar · Torricelli (FIUBA lab)",
+  "subtitle": "Real Modelación Numérica lab: 5 mm hole, 7.5 cm jar",
+  "question": "What is the discharge coefficient of the hole, and how long does the jar take to drain?",
+  "facts": {
+    "container_diameter_m": 0.075,
+    "hole_diameter_m": 0.005
+  },
+  "reference_csv": "examples/validation/fiuba_tabla_agua_5mm.csv"
+}

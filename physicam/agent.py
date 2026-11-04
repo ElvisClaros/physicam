@@ -404,10 +404,36 @@ class AgentSession:
                                  fps=tr.fps, aliases=list(getattr(tr, "aliases", []) or [])))
             return out
 
+        # Box-level pre-dedup: duplicate candidate prompts are dropped
+        # before any raster decoding / contour generation.
+        dropped_prompts: set[str] = set()
+        alias_of: dict[str, str] = {}  # dropped prompt -> kept prompt
+        uncached = [p for p in clean_prompts if p.strip().lower() not in self._label_cache]
+        if len(uncached) > 1 and self.client is not None:
+            try:
+                from physicam.sam import filter_duplicate_prompts, sam_text_for_prompt
+
+                texts = {}
+                for p in uncached:
+                    try:
+                        texts[p] = sam_text_for_prompt(self.client, self.video_path, p)
+                    except Exception:
+                        pass
+                if len(texts) > 1:
+                    kept_p, box_aliases = filter_duplicate_prompts(texts, self.fps)
+                    dropped_prompts = set(texts) - set(kept_p)
+                    for kept_label, dropped_list in box_aliases.items():
+                        for d in dropped_list:
+                            alias_of[d] = kept_label
+            except Exception:
+                dropped_prompts, alias_of = set(), {}
+
         def _one(p: str):
             key = p.strip().lower()
             if key in self._label_cache:
                 return p, list(self._label_cache[key]), True
+            if p in dropped_prompts:
+                return p, [], False
             return p, _slice(segment_video(self.client, self.video_path, p, self.fps)), False
 
         results: list[tuple[str, list, bool]] = []
@@ -429,12 +455,20 @@ class AgentSession:
         from physicam.sam import deduplicate_tracks
 
         all_tracks = deduplicate_tracks(raw_tracks) if raw_tracks else []
+        # Prompts dropped at box level were never decoded; record them as
+        # aliases of the kept track, as decoded dedup would have.
+        for dropped_p, kept_p in alias_of.items():
+            for tr in all_tracks:
+                if tr.label == kept_p and dropped_p != tr.label and dropped_p not in (tr.aliases or []):
+                    tr.aliases = list(tr.aliases or []) + [dropped_p]
         kept_ids = {t.id for t in all_tracks}
         for tr in raw_tracks:
             if tr.id not in kept_ids and self.tracks.get(tr.id) is tr:
                 del self.tracks[tr.id]
         for p, tracks, was_cached in results:
             matched = [t for t in all_tracks if t.label == p or p in (t.aliases or [])]
+            if not matched and p in alias_of:
+                matched = [t for t in all_tracks if t.label == alias_of[p]]
             self._label_cache[p.strip().lower()] = matched if matched else list(tracks)
         for tr in all_tracks:
             is_new = self.tracks.get(tr.id) is not tr

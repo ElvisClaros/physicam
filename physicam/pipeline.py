@@ -116,17 +116,47 @@ def _pretrack(client, video_path, plan, fps: float):
     if not candidates:
         return {}, ""
 
+    # Box-level pre-dedup: fetch SAM texts (cache/API), dedup candidate
+    # prompts on box records only, and decode only the kept prompts.
+    # Duplicates never pay raster decoding or contour generation.
+    from physicam.sam import filter_duplicate_prompts, sam_text_for_prompt
+
+    def _text(p):
+        try:
+            return p, sam_text_for_prompt(client, video_path, p)
+        except Exception:
+            return p, None
+
+    if len(candidates) == 1:
+        text_results = [_text(candidates[0])]
+    else:
+        with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as pool:
+            text_results = list(pool.map(_text, candidates))
+    prompt_texts = {p: t for p, t in text_results if t}
+    kept_prompts = list(prompt_texts)
+    box_alias_of: dict[str, str] = {}  # dropped prompt -> kept prompt
+    if len(prompt_texts) > 1:
+        try:
+            kept_prompts, _box_aliases = filter_duplicate_prompts(prompt_texts, fps)
+            for kept_label, dropped_list in _box_aliases.items():
+                for d in dropped_list:
+                    box_alias_of[d] = kept_label
+        except Exception:
+            kept_prompts = list(prompt_texts)
+
     def _one(p):
         try:
             return p, segment_video(client, video_path, p, fps)
         except Exception:
             return p, []
 
-    if len(candidates) == 1:
-        results = [_one(candidates[0])]
+    if len(kept_prompts) == 1:
+        results = [_one(kept_prompts[0])]
+    elif kept_prompts:
+        with ThreadPoolExecutor(max_workers=min(4, len(kept_prompts))) as pool:
+            results = list(pool.map(_one, kept_prompts))
     else:
-        with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as pool:
-            results = list(pool.map(_one, candidates))
+        results = []
     # Cross-prompt dedup: candidate prompts may segment the same object.
     from physicam.sam import deduplicate_tracks
 
@@ -138,6 +168,11 @@ def _pretrack(client, video_path, plan, fps: float):
                 tr.id = f"t{int(tr.id[1:]) + 1}" if tr.id[1:].isdigit() else f"t{len(taken)}"
             flat.append(tr)
     deduped = deduplicate_tracks(flat) if flat else []
+    # Box-dropped prompts were never decoded; keep them as aliases.
+    for dropped_p, kept_p in box_alias_of.items():
+        for tr in deduped:
+            if tr.label == kept_p and dropped_p != tr.label and dropped_p not in (tr.aliases or []):
+                tr.aliases = list(tr.aliases or []) + [dropped_p]
     pre: dict = {}
     parts: list[str] = []
     for tr in deduped:

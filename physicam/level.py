@@ -224,27 +224,23 @@ def _resolve_sam_text(video_path, sam_text_or_cache, prompt: str, data_dir: str 
 
 
 def _parse_rasters_with_conf(text: str):
-    """Parse SAM text -> {(oid, frame): (raster, bounds, conf)}."""
-    from meta_sam_parser import CompletedOutcome, decode_mask_to_raster, video_segmentation_format
+    """Parse SAM text -> {(oid, frame): (raster, bounds, conf)}.
+
+    Kept for compatibility; rasters come from the parallel mask cache
+    (lazily unpacked bit-packed rasters, never a serial re-decode).
+    """
+    from physicam.maskcache import decoded_masks
+    from physicam.sam import mask_cache_key_for_text
+
     if not text or not text.strip():
         return {}
-    parser = video_segmentation_format().create_parser()
-    parser.push(text if text.endswith("\n") else text + "\n")
-    result = parser.finish(CompletedOutcome()).result
-    conf_by_key: dict = {}
-    for rec in result.records:
-        if rec.kind == "box":
-            conf_by_key[(str(rec.object_id), int(rec.frame.frame_index))] = float(rec.confidence or 0.0)
+    ms = decoded_masks(text, mask_cache_key_for_text(text))
     out = {}
-    for rec in result.records:
-        if rec.kind != "mask":
+    for rec in ms.records:
+        if not rec.has_mask:
             continue
-        m = rec.mask
-        b = rec.bounds
-        raster = np.frombuffer(decode_mask_to_raster(m), np.uint8).reshape(m.height, m.width)
-        key = (str(rec.object_id), int(rec.frame.frame_index))
-        out[key] = (raster, (float(b.left), float(b.top), float(b.right), float(b.bottom)),
-                    float(rec.confidence or conf_by_key.get(key, 0.0)))
+        out[(rec.object_id, int(rec.frame))] = (
+            ms.raster(rec.index), tuple(float(v) for v in rec.bounds), float(rec.confidence))
     return out
 
 
@@ -346,9 +342,16 @@ def level_series_from_rasters(rasters: dict, fps: float, prompt: str = "",
         width_profile = {"y_px": wp_y, "h_px": bottom_y - wp_y, "width_px": wp_w}
 
     median_width = float(np.median(med_widths)) if med_widths else 0.0
+    return _finalize_level(frames_arr, surface_y, bottom_series, confs, median_width,
+                           width_profile, fps, prompt, m_per_px, hole_y_px, hole_height_m)
 
+
+def _finalize_level(frames_arr, surface_y, bottom_series, confs, median_width,
+                    width_profile, fps, prompt, m_per_px, hole_y_px, hole_height_m) -> LevelSeries:
+    """Shared hole-level / h_px assembly for raster- and stats-based input."""
+    bottom_y = float(np.median(bottom_series)) if len(bottom_series) else 0.0
+    t = frames_arr.astype(float) / float(fps) if fps else frames_arr.astype(float)
     warnings: list[str] = []
-    # Hole level.
     if hole_y_px is not None:
         hole_y, hole_est, hole_method = float(hole_y_px), True, "fact_hole_y_px"
     elif hole_height_m is not None and m_per_px:
@@ -360,15 +363,59 @@ def level_series_from_rasters(rasters: dict, fps: float, prompt: str = "",
             warnings.append("clip ends before draining stops: hole level unknown; "
                             "h is above the mask bottom and the Torricelli fit asymptote should be used")
     h_px = np.asarray(hole_y - surface_y, dtype=float) if hole_est else np.asarray(bottom_y - surface_y, dtype=float)
-    # Optional SG smoothing note: level noise ~0.75 px; fits use raw data.
-
     return LevelSeries(
         t=t, h_px=h_px, surface_y=surface_y, bottom_y=bottom_y,
         width_profile=width_profile, frames=frames_arr,
         conf=np.asarray(confs, dtype=float), fps=float(fps), prompt=prompt,
         hole_y=float(hole_y), hole_estimated=bool(hole_est), hole_method=hole_method,
-        bottom_series=bottom_series, median_width_px=median_width,
+        bottom_series=np.asarray(bottom_series, dtype=float), median_width_px=float(median_width),
         m_per_px=m_per_px, warnings=warnings)
+
+
+def level_series_from_maskset(ms, fps: float, prompt: str = "",
+                              m_per_px: float | None = None,
+                              hole_y_px: float | None = None,
+                              hole_height_m: float | None = None) -> LevelSeries:
+    """Build a LevelSeries from a MaskSet's precomputed stats (no unpacking).
+
+    Per frame the largest-area mask wins, as in
+    :func:`level_series_from_rasters`. The width profile uses the stored
+    row-width profiles of the first frames.
+    """
+    per_frame: dict[int, object] = {}
+    for rec in ms.records:
+        if not rec.has_mask or not np.isfinite(rec.surface_y):
+            continue
+        cur = per_frame.get(int(rec.frame))
+        if cur is None or rec.area > cur.area:
+            per_frame[int(rec.frame)] = rec
+    frames_list = sorted(per_frame)
+    if not frames_list:
+        raise ValueError(f"no mask records for level (prompt {prompt!r})")
+    frames_arr = np.asarray(frames_list, dtype=int)
+    surface_y = np.asarray([per_frame[f].surface_y for f in frames_list], dtype=float)
+    bottom_series = np.asarray([per_frame[f].bottom_y for f in frames_list], dtype=float)
+    confs = [per_frame[f].confidence for f in frames_list]
+    med_widths = [per_frame[f].median_width_px for f in frames_list]
+    bottom_y = float(np.median(bottom_series)) if bottom_series.size else 0.0
+
+    width_profile: dict = {"y_px": [], "h_px": [], "width_px": []}
+    k_first = min(len(frames_list), max(5, int(round(fps)) if fps else 5))
+    acc: dict[float, list] = {}
+    for f in frames_list[:k_first]:
+        rec = per_frame[f]
+        centres, widths = ms.row_widths(rec.index)
+        for cy, w in zip(centres, widths):
+            if w > 0:
+                acc.setdefault(round(float(cy)), []).append(float(w))
+    if acc:
+        ys = sorted(acc)
+        wp_y = np.asarray(ys, dtype=float)
+        wp_w = np.asarray([float(np.median(acc[y])) for y in ys], dtype=float)
+        width_profile = {"y_px": wp_y, "h_px": bottom_y - wp_y, "width_px": wp_w}
+    median_width = float(np.median(med_widths)) if med_widths else 0.0
+    return _finalize_level(frames_arr, surface_y, bottom_series, confs, median_width,
+                           width_profile, fps, prompt, m_per_px, hole_y_px, hole_height_m)
 
 
 def level_series(video_path, sam_text_or_cache=None, fps: float = 30.0, prompt: str = "brown liquid",
@@ -386,10 +433,24 @@ def level_series(video_path, sam_text_or_cache=None, fps: float = 30.0, prompt: 
                                          m_per_px=m_per_px, hole_y_px=hole_y_px,
                                          hole_height_m=hole_height_m)
     text = _resolve_sam_text(video_path, sam_text_or_cache, prompt, data_dir=data_dir)
-    rasters = _parse_rasters_with_conf(text)
-    if not rasters:
+    # Parallel mask cache: stats (surface/bottom/widths) without unpacking.
+    from physicam.maskcache import decoded_masks
+    from physicam.sam import mask_cache_key, mask_cache_key_for_text
+
+    cache_key = None
+    try:
+        from pathlib import Path as _P
+
+        from physicam.video import sha256_file
+
+        if video_path is not None and _P(video_path).exists():
+            cache_key = mask_cache_key(sha256_file(video_path), prompt)
+    except Exception:
+        cache_key = None
+    ms = decoded_masks(text, cache_key or mask_cache_key_for_text(text), data_dir=data_dir)
+    if not any(r.has_mask for r in ms.records):
         raise ValueError(f"no mask rasters in SAM text for prompt {prompt!r}")
-    return level_series_from_rasters(rasters, fps, prompt, m_per_px=m_per_px,
+    return level_series_from_maskset(ms, fps, prompt, m_per_px=m_per_px,
                                      hole_y_px=hole_y_px, hole_height_m=hole_height_m)
 
 

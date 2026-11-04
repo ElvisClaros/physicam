@@ -21,25 +21,34 @@ def cached_sam_text(data_dir: str, video_sha: str, prompt: str) -> str | None:
     return path.read_text() if path.exists() else None
 
 
-def parse_mask_rasters(text: str) -> dict[tuple[str, int], tuple[np.ndarray, tuple[float, float, float, float]]]:
-    """Parse SAM text into {(object_id, frame): (raster 0/1, bounds)}."""
-    from meta_sam_parser import CompletedOutcome, decode_mask_to_raster, video_segmentation_format
+def parse_mask_rasters(text: str, cache_key: str | None = None, data_dir: str = "data") -> dict[tuple[str, int], tuple[np.ndarray, tuple[float, float, float, float]]]:
+    """Parse SAM text into {(object_id, frame): (raster 0/1, bounds)}.
+
+    Rasters are lazily unpacked from the parallel mask cache; callers that
+    only need a few frames should prefer :func:`physicam.maskcache.decoded_masks`
+    directly (see :func:`make_strobe`).
+    """
+    from physicam.maskcache import decoded_masks
+    from physicam.sam import mask_cache_key_for_text
 
     if not text or not text.strip():
         return {}
-    parser = video_segmentation_format().create_parser()
-    parser.push(text if text.endswith("\n") else text + "\n")
-    result = parser.finish(CompletedOutcome()).result
+    ms = decoded_masks(text, cache_key or mask_cache_key_for_text(text), data_dir=data_dir)
     out: dict[tuple[str, int], tuple[np.ndarray, tuple[float, float, float, float]]] = {}
-    for rec in result.records:
-        if rec.kind != "mask":
+    for rec in ms.records:
+        if not rec.has_mask:
             continue
-        m = rec.mask
-        b = rec.bounds
-        raster = np.frombuffer(decode_mask_to_raster(m), np.uint8).reshape(m.height, m.width)
-        out[(str(rec.object_id), int(rec.frame.frame_index))] = (
-            raster, (float(b.left), float(b.top), float(b.right), float(b.bottom)))
+        out[(rec.object_id, int(rec.frame))] = (
+            ms.raster(rec.index), tuple(float(v) for v in rec.bounds))
     return out
+
+
+def _maskset_for_track(data_dir: str, sha: str, label: str, text: str):
+    """MaskSet for one track label, sharing the parse/level cache key."""
+    from physicam.maskcache import decoded_masks
+    from physicam.sam import mask_cache_key
+
+    return decoded_masks(text, mask_cache_key(sha, str(label)), data_dir=data_dir)
 
 
 def _choose_step(n: int, target: int = 18) -> int:
@@ -48,16 +57,30 @@ def _choose_step(n: int, target: int = 18) -> int:
     return max(1, round(n / target))
 
 
-def _median_plate(video_path: Path, duration: float, width: int, height: int, n_samples: int = 15) -> Image.Image:
+def _extract_frames_parallel(video_path: Path, times: list) -> list:
+    """Extract frames at *times* with parallel ffmpeg calls (ordered)."""
+    from concurrent.futures import ThreadPoolExecutor
+
     from physicam.video import extract_frame
 
+    def _one(t):
+        try:
+            return extract_frame(video_path, float(t))
+        except Exception:
+            return None
+
+    if len(times) <= 1:
+        return [_one(t) for t in times]
+    with ThreadPoolExecutor(max_workers=min(6, len(times))) as pool:
+        return list(pool.map(_one, times))
+
+
+def _median_plate(video_path: Path, duration: float, width: int, height: int, n_samples: int = 15) -> Image.Image:
     times = [duration * (i + 0.5) / n_samples for i in range(n_samples)] if duration > 0 else [0.0]
     frames = []
-    for t in times:
-        try:
-            frames.append(np.asarray(extract_frame(video_path, float(t)).resize((width, height)), dtype=np.float32))
-        except Exception:
-            continue
+    for img in _extract_frames_parallel(video_path, times):
+        if img is not None:
+            frames.append(np.asarray(img.resize((width, height)), dtype=np.float32))
     if not frames:
         return Image.new("RGB", (width, height), (16, 16, 16))
     return Image.fromarray(np.median(np.stack(frames), axis=0).astype(np.uint8))
@@ -103,9 +126,14 @@ def make_strobe(video_path, tracks, job_dir, data_dir: str, fits=None, width: in
         text = cached_sam_text(data_dir, sha, str(label))
         if text is None:
             continue
-        rasters = parse_mask_rasters(text)
-        if not rasters:
+        # Only the sampled frames' rasters are ever unpacked (lazy).
+        try:
+            maskset = _maskset_for_track(data_dir, sha, str(label), text)
+        except Exception:
             continue
+        if not any(r.has_mask for r in maskset.records):
+            continue
+        by_frame = maskset.by_frame()
         frames_arr = np.asarray(track.frames) if not isinstance(track, dict) else np.asarray(track.get("frames", []))
         xs = np.asarray(track.x, dtype=float) if not isinstance(track, dict) else np.asarray(track.get("x", []), dtype=float)
         ys = np.asarray(track.y, dtype=float) if not isinstance(track, dict) else np.asarray(track.get("y", []), dtype=float)
@@ -124,27 +152,31 @@ def make_strobe(video_path, tracks, job_dir, data_dir: str, fits=None, width: in
             if len(idxs) <= 12:
                 break
             step += max(1, step // 2)
+        # Collect this track's sampled masks, then batch-extract frames.
+        sampled = []
         for idx in range(0, len(frames_arr), step):
             frame_no = int(frames_arr[idx])
-            # Pick raster whose centroid is nearest the track centroid.
+            # Pick the record whose centroid is nearest the track centroid,
+            # then unpack only that raster.
             best = None
-            for (oid, f), (raster, bounds) in rasters.items():
-                if f != frame_no:
+            for rec in by_frame.get(frame_no, []):
+                if not rec.has_mask:
                     continue
-                x1, y1, x2, y2 = bounds
-                cxr, cyr = (x1 + x2) / 2, (y1 + y2) / 2
-                d = math.hypot(cxr - xs[idx], cyr - ys[idx])
+                d = math.hypot(rec.centroid_x - xs[idx], rec.centroid_y - ys[idx])
                 if best is None or d < best[0]:
-                    best = (d, raster, bounds)
+                    best = (d, rec)
             if best is None:
                 continue
-            _, raster, (x1, y1, x2, y2) = best
-            bw, bh = max(1, int(round(x2 - x1))), max(1, int(round(y2 - y1)))
-            try:
-                from physicam.video import extract_frame
-                frame_img = extract_frame(video_path, float(ts[idx]) if idx < len(ts) else frame_no / max(info.fps, 1))
-            except Exception:
+            _, best_rec = best
+            raster = maskset.raster(best_rec.index)
+            bounds = tuple(float(v) for v in best_rec.bounds)
+            t_extract = float(ts[idx]) if idx < len(ts) else frame_no / max(info.fps, 1)
+            sampled.append((idx, raster, bounds, t_extract))
+        frame_imgs = _extract_frames_parallel(video_path, [s[3] for s in sampled])
+        for (idx, raster, (x1, y1, x2, y2), _t_extract), frame_img in zip(sampled, frame_imgs):
+            if frame_img is None:
                 continue
+            bw, bh = max(1, int(round(x2 - x1))), max(1, int(round(y2 - y1)))
             if frame_img.size != (width, height):
                 frame_img = frame_img.resize((width, height))
             mask_img = Image.fromarray((raster * 255).astype(np.uint8)).resize((bw, bh), Image.NEAREST)

@@ -340,89 +340,148 @@ def _slug(prompt: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", prompt.lower()).strip("_") or "obj"
 
 
-def parse_sam_text(text: str, fps: float, label: str = "") -> list[Track]:
-    """Pure parser: SAM output text + fps -> tracks (unstiched, raw SAM ids)."""
-    from meta_sam_parser import CompletedOutcome, video_segmentation_format, decode_mask_to_raster, decode_mask_to_svg_path
+def mask_cache_key_for_text(text: str) -> str:
+    """Content-addressed mask-cache key for a raw SAM text."""
+    return f"text_{hashlib.sha256(text.encode()).hexdigest()[:24]}"
+
+
+def parse_sam_text(text: str, fps: float, label: str = "", *, cache_key: str | None = None,
+                   data_dir: str = "data", max_workers: int | None = None,
+                   with_contours: bool = True) -> list[Track]:
+    """Pure parser: SAM output text + fps -> tracks (unstiched, raw SAM ids).
+
+    Centroids/areas come from the parallel mask cache
+    (:mod:`physicam.maskcache`); contours are computed only for the
+    <= MAX_CONTOURS frames actually kept (every k-th per track).
+    """
+    from physicam.maskcache import decoded_masks, parse_records, plan_contour_indices
 
     if not text or not text.strip():
         return []
-    parser = video_segmentation_format().create_parser()
-    parser.push(text if text.endswith("\n") else text + "\n")
-    result = parser.finish(CompletedOutcome()).result
+    # Plan contour frames before decoding so they are traced from the
+    # rasters in the same worker pass (no second decode, cached on disk).
+    kept_idx: list[int] = []
+    if with_contours:
+        try:
+            _boxes, _masks = parse_records(text)
+            kept_idx = plan_contour_indices(_boxes, _masks, MAX_CONTOURS)
+        except Exception:
+            kept_idx = []
+    ms = decoded_masks(text, cache_key or mask_cache_key_for_text(text),
+                       data_dir=data_dir, max_workers=max_workers,
+                       contour_indices=kept_idx or None)
 
-    boxes: dict[tuple[str, int], tuple[float, float, float, float, float]] = {}
-    masks: dict[tuple[str, int], object] = {}
-    for rec in result.records:
-        if rec.kind == "box":
-            boxes[(str(rec.object_id), int(rec.frame.frame_index))] = (
-                float(rec.left), float(rec.top), float(rec.right), float(rec.bottom),
-                float(rec.confidence or 0.0))
-        elif rec.kind == "mask":
-            masks[(str(rec.object_id), int(rec.frame.frame_index))] = rec
-
-    obj_ids = sorted({oid for oid, _ in list(boxes.keys()) + list(masks.keys())},
-                     key=lambda s: (len(s), s))
     tracks: list[Track] = []
-    for oid in obj_ids:
-        frame_list = sorted({f for (o, f) in list(boxes.keys()) + list(masks.keys()) if o == oid})
-        rows = []
-        svg_by_frame: dict[int, str] = {}
-        for f in frame_list:
-            rec = masks.get((oid, f))
-            box = boxes.get((oid, f))
-            if rec is None and box is None:
+    by_oid: dict[str, list] = {}
+    for rec in ms.records:
+        by_oid.setdefault(rec.object_id, []).append(rec)
+    per_track_kept: dict[str, list] = {}
+    for oid in sorted(by_oid, key=lambda s: (len(s), s)):
+        recs = sorted(by_oid[oid], key=lambda r: r.frame)
+        stride = max(1, math.ceil(len(recs) / MAX_CONTOURS))
+        per_track_kept[oid] = recs[::stride]
+    svg_by_index: dict[int, str] = {}
+    if with_contours and kept_idx:
+        raw_svg = ms.contours
+        if not raw_svg:
+            try:
+                raw_svg = ms.ensure_contours(kept_idx, max_workers=max_workers)
+            except Exception:
+                raw_svg = {}
+        for idx, svg in raw_svg.items():
+            if not svg:
                 continue
-            if box is not None:
-                x1, y1, x2, y2, conf = box
-            else:
-                b = rec.bounds  # type: ignore[union-attr]
-                x1, y1, x2, y2 = float(b.left), float(b.top), float(b.right), float(b.bottom)
-                conf = float(rec.confidence or 0.0)  # type: ignore[union-attr]
-            if rec is not None:
-                m = rec.mask  # type: ignore[union-attr]
-                b = rec.bounds  # type: ignore[union-attr]
-                raster = np.frombuffer(decode_mask_to_raster(m), np.uint8).reshape(m.height, m.width)
-                sx = (x2 - x1) / m.width if m.width else 0.0
-                sy = (y2 - y1) / m.height if m.height else 0.0
-                count = float(raster.sum())
-                if count > 0:
-                    jj, ii = np.meshgrid(np.arange(m.width), np.arange(m.height))
-                    cx = x1 + float((raster * (jj + 0.5)).sum() / count) * sx
-                    cy = y1 + float((raster * (ii + 0.5)).sum() / count) * sy
-                    area = count * sx * sy
-                else:
-                    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-                    area = 0.0
-                try:
-                    svg_by_frame[f] = raster_path_to_frame(
-                        decode_mask_to_svg_path(m), x1, y1, x2 - x1, y2 - y1, m.width, m.height)
-                except Exception:
-                    pass
-            else:
-                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-                area = max(0.0, (x2 - x1) * (y2 - y1))
-            rows.append((f, cx, cy, area, x1, y1, x2, y2, conf))
-        if not rows:
+            r = ms.records[idx]
+            x1, y1, x2, y2 = (float(v) for v in r.box)
+            svg_by_index[idx] = raster_path_to_frame(
+                svg, x1, y1, x2 - x1, y2 - y1, r.raster_width, r.raster_height)
+
+    for oid in sorted(by_oid, key=lambda s: (len(s), s)):
+        recs = sorted(by_oid[oid], key=lambda r: r.frame)
+        if not recs:
             continue
-        rows.sort()
-        frames = np.array([r[0] for r in rows], dtype=int)
-        # Contour subsampling: keep every k-th so total <= MAX_CONTOURS.
-        stride = max(1, math.ceil(len(rows) / MAX_CONTOURS))
-        contours = {int(fr): svg_by_frame[fr] for fr in frames[::stride] if fr in svg_by_frame}
-        area_arr = np.array([r[3] for r in rows], dtype=float)
+        frames = np.array([r.frame for r in recs], dtype=int)
+        area_arr = np.array([r.area for r in recs], dtype=float)
+        contours = {int(r.frame): svg_by_index[r.index]
+                    for r in per_track_kept.get(oid, []) if r.index in svg_by_index}
         tracks.append(Track(
             id=f"t{len(tracks)}", label=label or oid,
             frames=frames, t=frames.astype(float) / fps,
-            x=np.array([r[1] for r in rows]), y=np.array([r[2] for r in rows]),
+            x=np.array([r.centroid_x for r in recs]), y=np.array([r.centroid_y for r in recs]),
             area=area_arr,
-            bbox=np.array([[r[4], r[5], r[6], r[7]] for r in rows], dtype=float),
-            conf=np.array([r[8] for r in rows], dtype=float),
+            bbox=np.array([[float(c) for c in r.box] for r in recs], dtype=float),
+            conf=np.array([r.confidence for r in recs], dtype=float),
             eq_diameter=np.sqrt(4.0 * np.maximum(area_arr, 0.0) / math.pi),
             contours=contours, fps=float(fps),
         ))
         # Keep raw SAM id available for stitching determinism via label fallback.
         tracks[-1]._sam_id = oid  # type: ignore[attr-defined]
     return tracks
+
+
+def box_only_tracks(text: str, fps: float, label: str = "") -> list[Track]:
+    """Lightweight tracks from SAM box records only (no mask decoding).
+
+    Centroids are box centres and areas are bbox areas; good enough for
+    cross-prompt duplicate detection before any raster decode is paid.
+    """
+    from physicam.maskcache import box_records
+
+    boxes = box_records(text)
+    by_oid: dict[str, list] = {}
+    for (oid, frame), (x1, y1, x2, y2, conf) in boxes.items():
+        by_oid.setdefault(str(oid), []).append((int(frame), x1, y1, x2, y2, conf))
+    tracks: list[Track] = []
+    for oid in sorted(by_oid, key=lambda s: (len(s), s)):
+        rows = sorted(by_oid[oid])
+        frames = np.array([r[0] for r in rows], dtype=int)
+        area_arr = np.array([max(0.0, (r[3] - r[1]) * (r[4] - r[2])) for r in rows], dtype=float)
+        tracks.append(Track(
+            id=f"t{len(tracks)}", label=label or oid,
+            frames=frames, t=frames.astype(float) / fps,
+            x=np.array([(r[1] + r[3]) / 2.0 for r in rows]),
+            y=np.array([(r[2] + r[4]) / 2.0 for r in rows]),
+            area=area_arr,
+            bbox=np.array([[r[1], r[2], r[3], r[4]] for r in rows], dtype=float),
+            conf=np.array([r[5] for r in rows], dtype=float),
+            eq_diameter=np.sqrt(4.0 * np.maximum(area_arr, 0.0) / math.pi),
+            contours={}, fps=float(fps),
+        ))
+        tracks[-1]._sam_id = oid  # type: ignore[attr-defined]
+    return tracks
+
+
+def filter_duplicate_prompts(prompt_texts: dict[str, str], fps: float) -> tuple[list[str], dict[str, list[str]]]:
+    """Box-level cross-prompt dedup before any raster decoding.
+
+    Returns (kept_prompts, aliases) where ``aliases`` maps a kept prompt to
+    the dropped duplicate prompts. A prompt is dropped only when every
+    box track it produced merged into another prompt's track.
+    """
+    flat: list[Track] = []
+    for prompt, text in prompt_texts.items():
+        if not text or not text.strip():
+            continue
+        for tr in box_only_tracks(text, fps, label=prompt):
+            taken = {t.id for t in flat}
+            while tr.id in taken:
+                tr.id = f"t{int(tr.id[1:]) + 1}" if tr.id[1:].isdigit() else f"t{len(taken)}"
+            flat.append(tr)
+    if not flat:
+        return [], {}
+    deduped = deduplicate_tracks(flat)
+    kept_labels = {t.label for t in deduped}
+    kept = [p for p in prompt_texts if p in kept_labels]
+    aliases: dict[str, list[str]] = {}
+    for tr in deduped:
+        for alias in tr.aliases or []:
+            if alias in prompt_texts and alias not in kept:
+                aliases.setdefault(tr.label, []).append(alias)
+    # Prompts with no box tracks at all are kept (decoding decides).
+    for p, text in prompt_texts.items():
+        if p not in kept and not any(t.label == p for t in flat):
+            kept.append(p)
+    return kept, aliases
 
 
 # ---------------------------------------------------------------------------
@@ -703,6 +762,40 @@ def _sam_cache_path(settings_data_dir: str, video_sha: str, prompt: str) -> Path
     return p
 
 
+def sam_text_for_prompt(client: "MetaClient", video_path: str | Path, prompt: str,
+                        *, cache: bool = True) -> str:
+    """SAM text for *prompt*: disk cache first, live API on a miss.
+
+    Split out of :func:`segment_video` so callers can run box-level
+    dedup on candidate prompts before paying for any mask decoding.
+    """
+    from physicam.video import sha256_file
+
+    video_path = Path(video_path)
+    sha = sha256_file(video_path)
+    cache_path = _sam_cache_path(client.settings.data_dir, sha, prompt)
+    if cache and cache_path.exists():
+        return cache_path.read_text()
+    file_id = client.upload_file(video_path)
+    body = {
+        "model": client.settings.sam, "stream": False,
+        "metadata": {"include_confidence": "true"},
+        "input": [{"role": "user", "content": [
+            {"type": "input_text", "text": prompt},
+            {"type": "input_video", "file_id": file_id}]}],
+    }
+    resp = client.responses(body)
+    text = client.output_text(resp)
+    if cache:
+        cache_path.write_text(text)
+    return text
+
+
+def mask_cache_key(video_sha: str, prompt: str) -> str:
+    """Mask-cache key shared by parse/level/strobe for one video+prompt."""
+    return f"{video_sha}_{_slug(prompt)}"
+
+
 def segment_video(client: "MetaClient", video_path: str | Path, prompt: str,
                   fps: float, *, cache: bool = True) -> list[Track]:
     """Upload, call SAM 3.1, parse, stitch. Raw text cached for free re-runs."""
@@ -710,24 +803,10 @@ def segment_video(client: "MetaClient", video_path: str | Path, prompt: str,
 
     video_path = Path(video_path)
     sha = sha256_file(video_path)
-    cache_path = _sam_cache_path(client.settings.data_dir, sha, prompt)
-    text: str | None = None
-    if cache and cache_path.exists():
-        text = cache_path.read_text()
-    if text is None:
-        file_id = client.upload_file(video_path)
-        body = {
-            "model": client.settings.sam, "stream": False,
-            "metadata": {"include_confidence": "true"},
-            "input": [{"role": "user", "content": [
-                {"type": "input_text", "text": prompt},
-                {"type": "input_video", "file_id": file_id}]}],
-        }
-        resp = client.responses(body)
-        text = client.output_text(resp)
-        if cache:
-            cache_path.write_text(text)
-    raw = parse_sam_text(text, fps, label=prompt)
+    text = sam_text_for_prompt(client, video_path, prompt, cache=cache)
+    raw = parse_sam_text(text, fps, label=prompt,
+                         cache_key=mask_cache_key(sha, prompt),
+                         data_dir=str(client.settings.data_dir))
     return stitch_tracks(raw, fps)
 
 
@@ -736,7 +815,9 @@ def segment_image(client: "MetaClient", pil_image: Image.Image, prompt: str) -> 
     import base64
     import io
 
-    from meta_sam_parser import CompletedOutcome, image_segmentation_format, decode_mask_to_raster
+    from meta_sam_parser import CompletedOutcome, image_segmentation_format
+
+    from physicam.maskcache import decode_mask_payloads
 
     buf = io.BytesIO()
     pil_image.convert("RGB").save(buf, format="PNG")
@@ -796,7 +877,8 @@ def segment_image(client: "MetaClient", pil_image: Image.Image, prompt: str) -> 
                 bx1, by1, bx2, by2 = float(b.left), float(b.top), float(b.right), float(b.bottom)
             except Exception:
                 bx1, by1, bx2, by2 = x1, y1, x2, y2
-            raster = np.frombuffer(decode_mask_to_raster(m), np.uint8).reshape(m.height, m.width)
+            # Decode via the shared maskcache worker (serial for one image).
+            [(raster, _stats)] = decode_mask_payloads([(m, (bx1, by1, bx2, by2), (x1, y1, x2, y2))])
             if float(raster.sum()) > 0:
                 item.update(mask_extents(raster, (bx1, by1, bx2, by2)))
                 # Preserve the SAM box as the reported bbox.
