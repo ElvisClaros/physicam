@@ -1,0 +1,35 @@
+[
+ {
+  "id": "bouncy-ball-240fps",
+  "slug": "bouncy-ball-240fps",
+  "title": "Bouncing ball \u00b7 240 fps",
+  "subtitle": "Coefficient of restitution + g (pixel units, no ruler in frame)",
+  "question": "What is the coefficient of restitution of this ball, and what does the throw tell us about g?",
+  "headline": "e = 0.70 \u00b1 0.12; g only in pixels",
+  "thumb_url": "examples/bouncy-ball-240fps/thumb.jpg",
+  "result_url": "examples/bouncy-ball-240fps/result.json",
+  "events_url": "examples/bouncy-ball-240fps/events.jsonl"
+ },
+ {
+  "id": "elastic-pendulum",
+  "slug": "elastic-pendulum",
+  "title": "Spring pendulum \u00b7 30 fps",
+  "subtitle": "Oscillation period of a mass on a spring (portrait phone video)",
+  "question": "What is the oscillation period of this spring pendulum?",
+  "headline": "T = 0.963 \u00b1 0.006 s",
+  "thumb_url": "examples/elastic-pendulum/thumb.jpg",
+  "result_url": "examples/elastic-pendulum/result.json",
+  "events_url": "examples/elastic-pendulum/events.jsonl"
+ },
+ {
+  "id": "fiuba-draining-water",
+  "slug": "fiuba-draining-water",
+  "title": "Draining jar \u00b7 Torricelli (FIUBA lab)",
+  "subtitle": "Real Modelaci\u00f3n Num\u00e9rica lab: 5 mm hole, 7.5 cm jar",
+  "question": "What is the discharge coefficient of the hole, and how long does the jar take to drain?",
+  "headline": "Cd = 0.56 \u00b1 0.03, drains in 46.2 \u00b1 0.9 s",
+  "thumb_url": "examples/fiuba-draining-water/thumb.jpg",
+  "result_url": "examples/fiuba-draining-water/result.json",
+  "events_url": "examples/fiuba-draining-water/events.jsonl"
+ }
+]
