@@ -17,7 +17,10 @@ def test_axis_aligned_rectangle():
     # Ellipse major overstates a rectangle side by ~15% (diagnostic only).
     assert ext["ellipse_major_px"] > 1.1 * ext["long_extent_px"]
     assert ext["bbox_width_px"] == 400.0 and ext["bbox_height_px"] == 283.0
-    assert abs(ext["robust_long_extent_px"] - 400.0) / 400.0 < 0.02
+    assert abs(ext["robust_long_extent_px"] - 400.0) / 400.0 < 0.005
+    assert abs(ext["robust_short_extent_px"] - 283.0) / 283.0 < 0.005
+    # Percentile numbers are retained only as diagnostics.
+    assert "trimmed_long_extent_px" in ext and "trimmed_short_extent_px" in ext
 
 
 def test_raster_frame_scale_half():
@@ -49,6 +52,9 @@ def test_disc():
     assert abs(ext["eq_diameter_px"] - 120.0) / 120.0 < 0.01
     assert abs(ext["long_extent_px"] - 120.0) / 120.0 < 0.01
     assert abs(ext["short_extent_px"] - 120.0) / 120.0 < 0.01
+    # Disc must not be ~4% short in the fields from_reference consumes.
+    assert abs(ext["robust_long_extent_px"] - 120.0) / 120.0 < 0.005
+    assert abs(ext["robust_short_extent_px"] - 120.0) / 120.0 < 0.005
 
 
 def test_robust_resists_stray_pixel():
@@ -59,6 +65,18 @@ def test_robust_resists_stray_pixel():
     stray = mask_extents(raster, (0.0, 0.0, 800.0, 600.0))
     assert stray["long_extent_px"] > clean["long_extent_px"] * 1.05
     assert abs(stray["robust_long_extent_px"] - clean["robust_long_extent_px"]) / clean["robust_long_extent_px"] < 0.02
+
+
+def test_stray_3px_blob_50px_away_does_not_change_robust():
+    raster = np.zeros((600, 800), dtype=np.uint8)
+    raster[100:383, 100:500] = 1  # 400x283 rectangle
+    clean = mask_extents(raster, (0.0, 0.0, 800.0, 600.0))
+    # 3-pixel blob whose nearest pixel is 50 px from the rectangle edge.
+    raster[100:103, 550] = 1
+    stray = mask_extents(raster, (0.0, 0.0, 800.0, 600.0))
+    assert abs(stray["robust_long_extent_px"] - clean["robust_long_extent_px"]) / clean["robust_long_extent_px"] < 0.005
+    assert abs(stray["robust_short_extent_px"] - clean["robust_short_extent_px"]) / clean["robust_short_extent_px"] < 0.005
+    assert abs(stray["robust_long_extent_px"] - 400.0) / 400.0 < 0.005
 
 
 def test_a4_aspect_check_flags_ratio_125():

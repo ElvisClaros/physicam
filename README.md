@@ -56,7 +56,10 @@ SHA-256 plus request parameters, so demos replay instantly and offline.
   re-entry).
 - **Calibration hierarchy.** (1) Facts given by the user or **spoken in the
   video's narration**; (2) a reference object of standard size (A4 sheet,
-  credit card…) segmented by SAM in a frame; (3) the tracked object's known
+  credit card…) segmented by SAM in a frame and measured by its **oriented
+  extent** on the largest connected mask component (not ellipse axes, which
+  overestimate a rectangle's side by 15.5 %), with an aspect-ratio check
+  that flags a tilted sheet; (3) the tracked object's known
   diameter from its mask size; (4) **gravity as a ruler**: assume
   g = 9.81 m/s² and solve for the scale, never used when the question is
   about g, and reported as `method: gravity`; (5) no calibration, in which

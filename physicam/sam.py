@@ -56,6 +56,48 @@ def raster_path_to_frame(svg_path: str, left: float, top: float,
     return _NUM_RE.sub(repl, svg_path)
 
 
+def _largest_4component(mask: np.ndarray) -> np.ndarray:
+    """Boolean mask of the largest 4-connected component of *mask*.
+
+    Pure-Python BFS (rasters are small); no new dependencies. Ties keep
+    the first component found in raster scan order.
+    """
+    fg = np.asarray(mask, dtype=bool)
+    if fg.ndim != 2 or not np.any(fg):
+        return np.zeros(fg.shape, dtype=bool) if fg.ndim == 2 else fg
+    h, w = fg.shape
+    visited = np.zeros((h, w), dtype=bool)
+    best: list[tuple[int, int]] = []
+    rows, cols = np.nonzero(fg)
+    for r0, c0 in zip(rows.tolist(), cols.tolist()):
+        if visited[r0, c0]:
+            continue
+        stack = [(r0, c0)]
+        visited[r0, c0] = True
+        comp: list[tuple[int, int]] = []
+        while stack:
+            i, j = stack.pop()
+            comp.append((i, j))
+            if i > 0 and fg[i - 1, j] and not visited[i - 1, j]:
+                visited[i - 1, j] = True
+                stack.append((i - 1, j))
+            if i + 1 < h and fg[i + 1, j] and not visited[i + 1, j]:
+                visited[i + 1, j] = True
+                stack.append((i + 1, j))
+            if j > 0 and fg[i, j - 1] and not visited[i, j - 1]:
+                visited[i, j - 1] = True
+                stack.append((i, j - 1))
+            if j + 1 < w and fg[i, j + 1] and not visited[i, j + 1]:
+                visited[i, j + 1] = True
+                stack.append((i, j + 1))
+        if len(comp) > len(best):
+            best = comp
+    out = np.zeros((h, w), dtype=bool)
+    for i, j in best:
+        out[i, j] = True
+    return out
+
+
 def mask_extents(raster: np.ndarray, bounds: tuple[float, float, float, float]) -> dict:
     """Oriented extents of a binary mask raster mapped to frame coordinates.
 
@@ -72,9 +114,12 @@ def mask_extents(raster: np.ndarray, bounds: tuple[float, float, float, float]) 
     width of one raster pixel, ``|vx|*sx + |vy|*sy``. This is the true
     side length for a rectangle, unlike the equivalent-ellipse major axis
     ``4*sqrt(lambda_max)`` which overstates a rectangle side by
-    ``4/sqrt(12) ~= 1.155``. The robust variants replace min/max with the
-    0.5th/99.5th percentiles (plus the same pixel-size correction) so a
-    few stray mask pixels do not inflate the size.
+    ``4/sqrt(12) ~= 1.155``. The robust variants are the exact extents
+    (same formula) of the largest 4-connected component only, so stray
+    disconnected pixels do not inflate the size without the bias that
+    percentile trimming introduces (0.99x for a rectangle, ~0.96x for a
+    disc). The old 0.5th/99.5th percentile numbers are kept only as
+    ``trimmed_*`` diagnostics and are not used for calibration.
     """
     arr = np.asarray(raster)
     left, top, right, bottom = (float(v) for v in bounds)
@@ -91,6 +136,7 @@ def mask_extents(raster: np.ndarray, bounds: tuple[float, float, float, float]) 
             "oriented_width_px": bw, "oriented_height_px": bh,
             "long_extent_px": 0.0, "short_extent_px": 0.0,
             "robust_long_extent_px": 0.0, "robust_short_extent_px": 0.0,
+            "trimmed_long_extent_px": 0.0, "trimmed_short_extent_px": 0.0,
             "longest_px": 0.0, "shortest_px": 0.0,
         }
     rh, rw = arr.shape
@@ -129,14 +175,44 @@ def mask_extents(raster: np.ndarray, bounds: tuple[float, float, float, float]) 
     short_extent = float(proj_minor.max() - proj_minor.min()) + _pix(minor_vec)
     lo_m, hi_m = np.percentile(proj_major, [0.5, 99.5])
     lo_s, hi_s = np.percentile(proj_minor, [0.5, 99.5])
-    robust_long = float(hi_m - lo_m) + _pix(major_vec)
-    robust_short = float(hi_s - lo_s) + _pix(minor_vec)
+    trimmed_long = float(hi_m - lo_m) + _pix(major_vec)
+    trimmed_short = float(hi_s - lo_s) + _pix(minor_vec)
+    # Robust extents: exact extents of the largest 4-connected component,
+    # with principal axes recomputed from that component alone.
+    comp = _largest_4component(np.asarray(arr) != 0)
+    ci, cj = np.nonzero(comp)
+    if ci.size == 0:
+        robust_long, robust_short = long_extent, short_extent
+        robust_angle = angle_deg
+    elif ci.size == len(xs):
+        robust_long, robust_short = long_extent, short_extent
+        robust_angle = angle_deg
+    else:
+        cxs = left + (cj.astype(float) + 0.5) * sx
+        cys = top + (ci.astype(float) + 0.5) * sy
+        cdx, cdy = cxs - float(cxs.mean()), cys - float(cys.mean())
+        ccov = np.array([[float((cdx * cdx).mean()), float((cdx * cdy).mean())],
+                         [float((cdx * cdy).mean()), float((cdy * cdy).mean())]])
+        _, cevecs = np.linalg.eigh(ccov)
+        cmajor = cevecs[:, -1].astype(float)
+        cminor = cevecs[:, 0].astype(float)
+        robust_angle = math.degrees(math.atan2(float(cmajor[1]), float(cmajor[0])))
+        while robust_angle <= -90.0:
+            robust_angle += 180.0
+            cmajor = -cmajor
+        while robust_angle > 90.0:
+            robust_angle -= 180.0
+            cmajor = -cmajor
+        pmaj = cdx * cmajor[0] + cdy * cmajor[1]
+        pmin = cdx * cminor[0] + cdy * cminor[1]
+        robust_long = float(pmaj.max() - pmaj.min()) + _pix(cmajor)
+        robust_short = float(pmin.max() - pmin.min()) + _pix(cminor)
     area = float(len(xs)) * sx * sy
     ellipse_major = 4.0 * math.sqrt(max(float(eigvals[0]), 0.0))
     ellipse_minor = 4.0 * math.sqrt(max(float(eigvals[1]), 0.0))
     bw, bh = float(right - left), float(bottom - top)
     # Oriented width/height: assign long/short by the major axis angle.
-    if abs(angle_deg) <= 45.0:
+    if abs(robust_angle) <= 45.0:
         oriented_w, oriented_h = robust_long, robust_short
         oriented_w_plain, oriented_h_plain = long_extent, short_extent
     else:
@@ -161,6 +237,8 @@ def mask_extents(raster: np.ndarray, bounds: tuple[float, float, float, float]) 
         "short_extent_px": float(short_extent),
         "robust_long_extent_px": float(robust_long),
         "robust_short_extent_px": float(robust_short),
+        "trimmed_long_extent_px": float(trimmed_long),
+        "trimmed_short_extent_px": float(trimmed_short),
         "longest_px": float(long_extent),
         "shortest_px": float(short_extent),
     }
@@ -706,6 +784,7 @@ def segment_image(client: "MetaClient", pil_image: Image.Image, prompt: str) -> 
                       "orientation_deg": 0.0,
                       "long_extent_px": max(bw, bh), "short_extent_px": min(bw, bh),
                       "robust_long_extent_px": max(bw, bh), "robust_short_extent_px": min(bw, bh),
+                      "trimmed_long_extent_px": max(bw, bh), "trimmed_short_extent_px": min(bw, bh),
                       "oriented_width_px": bw, "oriented_height_px": bh,
                       "longest_px": max(bw, bh), "shortest_px": min(bw, bh),
                       "eq_diameter_px": math.sqrt(4.0 * bw * bh / math.pi) if bw > 0 and bh > 0 else 0.0}
