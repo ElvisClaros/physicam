@@ -103,7 +103,7 @@ def test_pendulum_recovers_period_within_half_pct():
     t, x, y = with_gaps(t, add_noise(x, rng=rng), add_noise(y, rng=rng), drop_frac=0.1)
     track = make_track(t, x, y, fps)
     fit = fit_model(track, "pendulum", Calibration(0.001, 0.0, "reference", ""))
-    T = fit.params["period"]["value"]
+    T = fit.params["T"]["value"]
     assert abs(T - T_true) / T_true < 0.005, f"T={T}"
 
 

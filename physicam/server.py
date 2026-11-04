@@ -184,6 +184,16 @@ def create_app() -> FastAPI:
             path = cands[0]
         return _range_response(path, request, "video/mp4")
 
+    @app.get("/media/{job_id}/strobe.jpg")
+    def media_strobe(job_id: str):
+        job_dir = find_job_dir(job_id)
+        if job_dir is None:
+            raise HTTPException(404, "job not found")
+        path = job_dir / "strobe.jpg"
+        if not path.exists():
+            raise HTTPException(404, "strobe not found")
+        return FileResponse(path, media_type="image/jpeg")
+
     @app.get("/api/jobs/{job_id}/thumb.jpg")
     def thumb(job_id: str):
         job_dir = find_job_dir(job_id)

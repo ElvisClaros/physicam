@@ -182,13 +182,22 @@ summaries; never return raw masks to the model.
              "frames": [0, 1, …], "t": [0.0, …], "x": [..px..], "y": [..px..], "area": [..], "bbox": [[x1, y1, x2, y2], …],
              "contours": {"0": "M…Z", "5": "M…Z"}}],
  "fits": [{"id": "f0", "track_id": "t0", "model": "bounce", "t_range": [a, b], "params": {"g": {"value": 9.79, "stderr": 0.08, "unit": "m/s^2"}},
-           "r2": 0.999, "rmse_px": 0.7, "curve": {"t": [], "y": []}, "segments": [], "warnings": []}],
+           "info": {"axis": "y"}, "r2": 0.999, "rmse_px": 0.7, "curve": {"t": [], "x": [], "y": []},
+           "segments": [{"index": 0, "t_range": [a, b], "curve": {"t": [], "x": [], "y": []}}],
+           "impacts": [{"t": 0.32, "x": 640.0, "y": 540.0, "e": 0.72, "e_stderr": 0.01, "e_height": 0.71, "valid": true}],
+           "restitution": [], "impact_times": [], "warnings": []}],
  "answer": {"headline": "g = 9.79 ± 0.08 m/s²", "value": 9.79, "unit": "m/s^2", "uncertainty": 0.08, "summary": "…"},
+ "strobe_url": "/media/<id>/strobe.jpg",
  "report_markdown": "…",
- "trace": [{"step": 1, "kind": "plan|tool|answer|report", "name": "track_objects", "args": {}, "summary": "…", "ms": 41000}],
+ "trace": [{"step": 1, "kind": "plan|tool|answer|report", "name": "track_objects", "args": {}, "summary": "…", "title": "SAM 3.1 tracked “red ball”: 960 frames (0.00–4.00 s)", "ms": 41000}],
  "cost": {"sam_frames": 960, "spark_tokens": 12345, "usd_estimate": 0.21}}
 ```
-SSE events (`GET /api/jobs/<id>/events`): `{"type": "stage"|"trace"|"track"|"fit"|"answer"|"report"|"done"|"error", …}`.
+Fit contract notes: `curve` always carries `t` plus both `x` and `y` where meaningful (pendulum/oscillator
+also set `curve.axis` and `info.axis`); non-numeric info goes in `info`, not `params`; no duplicate
+`period`/`T` (keep `T`). Bounce fits emit `impacts[]` in the shape above (positions from the track);
+`restitution[]`/`impact_times[]` are kept for compatibility. Plans give `sam_prompts` (2–4 short
+1–3-word candidates) per moving object.
+SSE events (`GET /api/jobs/<id>/events`): `{"type": "stage"|"trace"|"track"|"fit"|"answer"|"report"|"strobe"|"done"|"error", …}`; a `strobe` event carries `url`/`strobe_url`.
 
 ## Commands
 - Tests: `.venv/bin/python -m pytest -q`

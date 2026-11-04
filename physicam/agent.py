@@ -24,14 +24,16 @@ Rules:
 - Always report uncertainty. Inspect fit quality (R^2, residual RMS, warnings) and refit with a different window or model when a fit is poor (R^2 < 0.98 or large warnings).
 - Calibration preference, in order: (1) user facts or spoken facts, (2) a static reference object of standard size, (3) the tracked object's standard size, (4) gravity as the ruler (only when the question is NOT about g itself), (5) pixels (say so honestly).
 - Use track_objects first, then calibrate, then fit_model, inspect the fit, and finally call finish.
+- SAM prompts must be 1-3 words: colour/material + noun ("metal ball", "red ball", "spring"). Long descriptive prompts fail. Use track_objects with prompts=[...] to try 2-4 short candidates concurrently.
 - Prefer per-frame perspective calibration (calibrate_from_track per_frame) when the apparent size varies.
 - Keep steps efficient: at most a handful of tool calls."""
 
 TOOLS: list[dict] = [
-    {"type": "function", "name": "track_objects", "description": "Track an object with SAM 3.1. Returns stitched track summaries with ids.",
+    {"type": "function", "name": "track_objects", "description": "Track objects with SAM 3.1. Each prompt must be 1-3 words: colour/material + noun (\"metal ball\", \"red ball\", \"spring\"); long descriptive prompts fail and will be simplified. Pass prompts=[...] with 2-4 short candidates to run them concurrently. Returns stitched track summaries with ids.",
      "parameters": {"type": "object", "properties": {
-         "prompt": {"type": "string"}, "t_start": {"type": ["number", "null"]}, "t_end": {"type": ["number", "null"]}},
-         "required": ["prompt"], "additionalProperties": False}},
+         "prompt": {"type": ["string", "null"]}, "prompts": {"type": ["array", "null"], "items": {"type": "string"}},
+         "t_start": {"type": ["number", "null"]}, "t_end": {"type": ["number", "null"]}},
+         "required": [], "additionalProperties": False}},
     {"type": "function", "name": "calibrate_reference", "description": "Calibrate from a static reference object of known size.",
      "parameters": {"type": "object", "properties": {
          "prompt": {"type": "string"}, "real_size_m": {"type": "number"}, "dimension": {"type": "string"}},
@@ -81,6 +83,90 @@ class AgentResult:
     used_fallback: bool = False
 
 
+_SAM_FILLER = {"small", "shiny", "spherical", "round", "swinging", "hanging", "free", "at", "the",
+               "end", "of", "a", "an", "near", "on", "in", "with", "attached", "coil", "tiny", "large",
+               "big", "little", "object", "moving"}
+
+
+def simplify_sam_prompt(prompt: str) -> tuple[str, bool]:
+    """Simplify a SAM prompt to 1-3 words when it exceeds 4 words."""
+    import re as _re
+    raw = str(prompt or "").strip()
+    words = _re.findall(r"[A-Za-z0-9'-]+", raw.lower())
+    if len(words) <= 4:
+        return raw, False
+    kept = [w for w in words if w not in _SAM_FILLER]
+    if not kept:
+        kept = words
+    simplified = " ".join(kept[:3])
+    return simplified, simplified.lower() != raw.lower()
+
+
+def _fmt_num(v) -> str:
+    try:
+        return f"{float(v):.4g}"
+    except Exception:
+        return str(v)
+
+
+def make_trace_title(name: str, args: dict, result) -> str:
+    """Human one-line title for a trace event from its tool result."""
+    args = args or {}
+    if isinstance(result, dict) and result.get("error"):
+        return f"{name}: {str(result['error'])[:80]}"
+    if name == "track_objects":
+        tracks = (result or {}).get("tracks", []) if isinstance(result, dict) else []
+        prompts = args.get("prompts") or ([args.get("prompt")] if args.get("prompt") else [])
+        simplified = (result or {}).get("simplified") if isinstance(result, dict) else None
+        if not tracks:
+            label = ", ".join(str(p) for p in prompts) or "object"
+            return f"SAM 3.1 found nothing for \u201c{label}\u201d"
+        parts = []
+        for tr in tracks[:3]:
+            tr_range = tr.get("t_range") or [0, 0]
+            parts.append(f"SAM 3.1 tracked \u201c{tr.get('label', '')}\u201d: {tr.get('n_frames', 0)} frames "
+                         f"({_fmt_num(tr_range[0])}\u2013{_fmt_num(tr_range[1])} s)")
+        title = "; ".join(parts)
+        if simplified:
+            title += f" (simplified prompt: {simplified[0].get('from', '')} \u2192 {simplified[0].get('to', '')})"
+        return title
+    if name == "fit_model":
+        model = args.get("model", "")
+        if isinstance(result, dict) and result.get("params"):
+            params = result["params"]
+            for key in ("T", "g", "speed", "e_0"):
+                if key in params and isinstance(params[key], dict):
+                    p = params[key]
+                    unit = p.get("unit", "")
+                    return (f"Fit {model} \u2192 {key} = {_fmt_num(p.get('value'))} \u00b1 "
+                            f"{_fmt_num(p.get('stderr', 0))} {unit} (R\u00b2 {_fmt_num(result.get('r2', 0))})").strip()
+            return f"Fit {model} (R\u00b2 {_fmt_num(result.get('r2', 0))})"
+        return f"Fit {model}"
+    if name == "inspect_frames":
+        text = str((result or {}).get("text", "")) if isinstance(result, dict) else ""
+        n = len(args.get("times_s") or [])
+        return f"Looked at {n} frames: {text[:80]}"
+    if name == "run_python":
+        parsed = (result or {}).get("result") if isinstance(result, dict) else None
+        if isinstance(parsed, dict) and parsed:
+            inner = ", ".join(f"{k} = {_fmt_num(v)}" for k, v in list(parsed.items())[:4]
+                              if isinstance(v, (int, float)))
+            return f"Python: {inner}" if inner else f"Python: {str(parsed)[:80]}"
+        if parsed is not None:
+            return f"Python: {str(parsed)[:80]}"
+        stdout = str((result or {}).get("stdout", "")) if isinstance(result, dict) else ""
+        return f"Python: {stdout.strip().splitlines()[0][:80] if stdout.strip() else 'ran'}"
+    if name.startswith("calibrate"):
+        if isinstance(result, dict) and result.get("m_per_px"):
+            return f"Calibrated: {_fmt_num(float(result['m_per_px']) * 1000)} mm/px ({result.get('method', '')})"
+        return "Calibrated"
+    if name == "finish":
+        return str(args.get("headline") or (result or {}).get("headline") or "Finished")
+    if name == "finish_rejected":
+        return "Finish rejected: no fit yet"
+    return str(name)
+
+
 def _trange(a, b):
     if a is None and b is None:
         return None
@@ -91,7 +177,8 @@ class AgentSession:
     """Holds per-job state and implements the agent tools."""
 
     def __init__(self, client, video_path, plan: Plan, question: str, facts: dict | None,
-                 fps: float, width: int = 0, height: int = 0, emit=None):
+                 fps: float, width: int = 0, height: int = 0, emit=None,
+                 pre_tracked: dict | None = None, pre_summary: str = ""):
         self.client = client
         self.video_path = str(video_path)
         self.plan = plan
@@ -107,11 +194,29 @@ class AgentSession:
         self._fit_counter = 0
         self.answer: dict | None = None
         self.trace: list[dict] = []
+        self.pre_summary = pre_summary or ""
+        for _prompt, _tracks in (pre_tracked or {}).items():
+            self._label_cache[str(_prompt).strip().lower()] = list(_tracks)
+            for _tr in _tracks:
+                if _tr.id in self.tracks:
+                    _tr.id = f"t{len(self.tracks)}"
+                self.tracks[_tr.id] = _tr
 
     # -- emit helpers -------------------------------------------------------
-    def _trace(self, step: int, name: str, args: dict, summary: str, ms: int):
+    def _trace(self, step: int, name: str, args: dict, summary: str, ms: int, title: str | None = None, result=None):
+        if title is None:
+            parsed = result
+            if parsed is None:
+                try:
+                    parsed = json.loads(summary) if summary and summary.strip().startswith("{") else summary
+                except Exception:
+                    parsed = summary
+            try:
+                title = make_trace_title(name, args, parsed)
+            except Exception:
+                title = summary[:120]
         entry = {"step": step, "kind": "tool", "name": name, "args": args,
-                 "summary": summary[:500], "ms": int(ms)}
+                 "summary": summary[:2000], "title": str(title)[:300], "ms": int(ms)}
         self.trace.append(entry)
         try:
             self.emit({"type": "trace", **entry})
@@ -136,16 +241,33 @@ class AgentSession:
         return self.tracks[track_id]
 
     # -- tools ---------------------------------------------------------------
-    def tool_track_objects(self, prompt: str, t_start=None, t_end=None) -> dict:
+    def tool_track_objects(self, prompt: str | None = None, t_start=None, t_end=None, prompts=None) -> dict:
+        from concurrent.futures import ThreadPoolExecutor
+
         from physicam.sam import segment_video
-        key = prompt.strip().lower()
-        if key in self._label_cache:
-            return {"tracks": [t.summary() for t in self._label_cache[key]], "cached": True}
-        tracks = segment_video(self.client, self.video_path, prompt, self.fps)
-        # Optional time-window slice (keep ids from segment_video).
-        if t_start is not None or t_end is not None:
+        raw_prompts: list[str] = []
+        if prompts:
+            raw_prompts = [str(p) for p in prompts if str(p).strip()]
+        if prompt:
+            raw_prompts.append(str(prompt))
+        if not raw_prompts:
+            raise ValueError("track_objects requires prompt or prompts")
+        simplified: list[dict] = []
+        clean_prompts: list[str] = []
+        for p in raw_prompts:
+            clean, changed = simplify_sam_prompt(p)
+            if changed:
+                simplified.append({"from": p, "to": clean})
+            clean_prompts.append(clean)
+        # Dedupe preserving order.
+        seen: set[str] = set()
+        clean_prompts = [p for p in clean_prompts if not (p.lower() in seen or seen.add(p.lower()))]  # type: ignore[func-returns-value]
+
+        def _slice(tracks):
+            if t_start is None and t_end is None:
+                return tracks
             from physicam.sam import Track
-            sliced = []
+            out = []
             for tr in tracks:
                 mask = np.ones(tr.n, dtype=bool)
                 if t_start is not None:
@@ -155,18 +277,48 @@ class AgentSession:
                 if mask.sum() < 2:
                     continue
                 idx = np.where(mask)[0]
-                sliced.append(Track(id=tr.id, label=tr.label, frames=tr.frames[idx], t=tr.t[idx],
-                                    x=tr.x[idx], y=tr.y[idx], area=tr.area[idx], bbox=tr.bbox[idx],
-                                    conf=tr.conf[idx], eq_diameter=tr.eq_diameter[idx],
-                                    contours={int(tr.frames[i]): tr.contours[int(tr.frames[i])]
-                                              for i in idx if int(tr.frames[i]) in tr.contours},
-                                    fps=tr.fps))
-            tracks = sliced
-        self._label_cache[key] = tracks
-        for tr in tracks:
-            self.tracks[tr.id] = tr
-            self._emit_track(tr)
-        return {"tracks": [t.summary() for t in tracks]}
+                out.append(Track(id=tr.id, label=tr.label, frames=tr.frames[idx], t=tr.t[idx],
+                                 x=tr.x[idx], y=tr.y[idx], area=tr.area[idx], bbox=tr.bbox[idx],
+                                 conf=tr.conf[idx], eq_diameter=tr.eq_diameter[idx],
+                                 contours={int(tr.frames[i]): tr.contours[int(tr.frames[i])]
+                                           for i in idx if int(tr.frames[i]) in tr.contours},
+                                 fps=tr.fps))
+            return out
+
+        def _one(p: str):
+            key = p.strip().lower()
+            if key in self._label_cache:
+                return p, list(self._label_cache[key]), True
+            return p, _slice(segment_video(self.client, self.video_path, p, self.fps)), False
+
+        results: list[tuple[str, list, bool]] = []
+        if len(clean_prompts) == 1:
+            results = [_one(clean_prompts[0])]
+        else:
+            with ThreadPoolExecutor(max_workers=min(4, len(clean_prompts))) as pool:
+                results = list(pool.map(_one, clean_prompts))
+        all_tracks: list = []
+        cached_any = False
+        for p, tracks, was_cached in results:
+            cached_any = cached_any or was_cached
+            self._label_cache[p.strip().lower()] = tracks
+            for tr in tracks:
+                if tr.id in self.tracks and self.tracks[tr.id] is not tr:
+                    tr.id = f"t{len(self.tracks)}"
+                    # Reassign subsequent duplicates deterministically.
+                    while tr.id in self.tracks:
+                        tr.id = f"t{int(tr.id[1:]) + 1}" if tr.id[1:].isdigit() else f"t{len(self.tracks)}"
+                if tr.id not in self.tracks:
+                    self.tracks[tr.id] = tr
+                    self._emit_track(tr)
+                all_tracks.append(tr)
+        out: dict = {"tracks": [t.summary() for t in all_tracks], "prompts": clean_prompts}
+        if simplified:
+            out["simplified"] = simplified
+            out["note"] = "; ".join(f"prompt simplified: {s['from']!r} -> {s['to']!r}" for s in simplified)
+        if cached_any:
+            out["cached"] = True
+        return out
 
     def tool_calibrate_reference(self, prompt: str, real_size_m: float, dimension: str = "longest") -> dict:
         mid = 0.0
@@ -251,13 +403,27 @@ class AgentSession:
         tracks = {tid: {"t": tr.t, "x": tr.x, "y": tr.y, "area": tr.area}
                   for tid, tr in self.tracks.items()}
         mpp = self.calibration.m_per_px if self.calibration else 1.0
-        return sandbox_run(code, tracks, mpp)
+        out = sandbox_run(code, tracks, mpp)
+        stdout = str(out.get("stdout", "") or "").strip()
+        if stdout:
+            try:
+                out["result"] = json.loads(stdout)
+            except Exception:
+                # Last non-empty line may be JSON.
+                for line in reversed(stdout.splitlines()):
+                    try:
+                        out["result"] = json.loads(line.strip())
+                        break
+                    except Exception:
+                        continue
+        return out
 
     def dispatch(self, name: str, args: dict) -> dict:
         """Execute one tool by name; returns a JSON-serialisable dict."""
         args = _sanitize_args(name, dict(args or {}))
         if name == "track_objects":
-            return self.tool_track_objects(args["prompt"], args.get("t_start"), args.get("t_end"))
+            return self.tool_track_objects(args.get("prompt"), args.get("t_start"), args.get("t_end"),
+                                           prompts=args.get("prompts"))
         if name == "calibrate_reference":
             return self.tool_calibrate_reference(args["prompt"], float(args["real_size_m"]),
                                                  args.get("dimension") or "longest")
@@ -332,6 +498,7 @@ def run_agent_loop(session: AgentSession, max_steps: int = 12, timeout_s: float 
         "fps": session.fps, "video": session.video_path,
         "instructions": "Track, calibrate, fit, check fit quality, then finish. "
                         "Calibration preference and never-invent-numbers rules are in the system prompt.",
+        "pre_tracked": session.pre_summary,
     }
     body: dict = {
         "model": getattr(getattr(client, "settings", None), "spark", "muse-spark-1.3"),
@@ -380,7 +547,7 @@ def run_agent_loop(session: AgentSession, max_steps: int = 12, timeout_s: float 
                     "summary": str(args.get("summary", "")),
                     "fit_ids": list(args.get("fit_ids") or []),
                 }
-                session._trace(step, "finish", args, session.answer["headline"], int((time.time() - ct0) * 1000))
+                session._trace(step, "finish", args, session.answer["headline"], int((time.time() - ct0) * 1000), result=session.answer)
                 finished = True
                 break
             try:
@@ -389,7 +556,7 @@ def run_agent_loop(session: AgentSession, max_steps: int = 12, timeout_s: float 
             except Exception as exc:  # tool errors go back to the model
                 out = {"error": f"{type(exc).__name__}: {exc}"}
                 summary = out["error"]
-            session._trace(step, name, args, summary, int((time.time() - ct0) * 1000))
+            session._trace(step, name, args, summary, int((time.time() - ct0) * 1000), result=out)
             outputs.append({"type": "function_call_output", "call_id": call.get("call_id", ""),
                             "output": json.dumps(out)[:12000]})
         if finished:
@@ -456,10 +623,14 @@ def run_fallback(session: AgentSession) -> AgentResult:
     plan = session.plan
     step = 100
     prompt = plan.moving_objects[0].sam_prompt if plan.moving_objects else "red ball"
+    candidates = (plan.moving_objects[0].sam_prompts if plan.moving_objects and plan.moving_objects[0].sam_prompts else [prompt])
     t0 = time.time()
-    out = session.tool_track_objects(prompt)
-    session._trace(step, "track_objects", {"prompt": prompt}, json.dumps(out)[:400],
-                   int((time.time() - t0) * 1000))
+    if session.tracks:
+        out = {"tracks": [t.summary() for t in session.tracks.values()], "pre_tracked": True}
+    else:
+        out = session.tool_track_objects(prompts=candidates)
+    session._trace(step, "track_objects", {"prompt": prompt, "prompts": candidates}, json.dumps(out)[:2000],
+                   int((time.time() - t0) * 1000), result=out)
     if not session.tracks:
         raise RuntimeError(f"fallback: no tracks for prompt {prompt!r}")
     track = list(session.tracks.values())[0]
@@ -471,28 +642,28 @@ def run_fallback(session: AgentSession) -> AgentResult:
             t0 = time.time()
             o = session.tool_calibrate_reference(nf["reference_object"], float(nf["reference_size_m"]),
                                                  nf.get("dimension", "longest"))
-            session._trace(step, "calibrate_reference", {"prompt": nf["reference_object"]}, json.dumps(o)[:400],
-                           int((time.time() - t0) * 1000))
+            session._trace(step, "calibrate_reference", {"prompt": nf["reference_object"]}, json.dumps(o)[:2000],
+                           int((time.time() - t0) * 1000), result=o)
             calibrated = True
         elif nf.get("diameter_m"):
             t0 = time.time()
             o = session.tool_calibrate_from_track(track.id, float(nf["diameter_m"]), None)
-            session._trace(step, "calibrate_from_track", {"track_id": track.id}, json.dumps(o)[:400],
-                           int((time.time() - t0) * 1000))
+            session._trace(step, "calibrate_from_track", {"track_id": track.id}, json.dumps(o)[:2000],
+                           int((time.time() - t0) * 1000), result=o)
             calibrated = True
         elif plan.reference_candidates:
             r = sorted(plan.reference_candidates, key=lambda c: -float(c.confidence or 0))[0]
             if float(r.confidence or 0) >= 0.5:
                 t0 = time.time()
                 o = session.tool_calibrate_reference(r.sam_prompt, float(r.real_size_m), r.dimension or "longest")
-                session._trace(step, "calibrate_reference", {"prompt": r.sam_prompt}, json.dumps(o)[:400],
-                               int((time.time() - t0) * 1000))
+                session._trace(step, "calibrate_reference", {"prompt": r.sam_prompt}, json.dumps(o)[:2000],
+                               int((time.time() - t0) * 1000), result=o)
                 calibrated = True
         if not calibrated and plan.moving_objects and plan.moving_objects[0].standard_size_m:
             t0 = time.time()
             o = session.tool_calibrate_from_track(track.id, float(plan.moving_objects[0].standard_size_m), None)
-            session._trace(step, "calibrate_from_track", {"track_id": track.id}, json.dumps(o)[:400],
-                           int((time.time() - t0) * 1000))
+            session._trace(step, "calibrate_from_track", {"track_id": track.id}, json.dumps(o)[:2000],
+                           int((time.time() - t0) * 1000), result=o)
             calibrated = True
     except Exception:
         calibrated = session.calibration is not None
@@ -502,13 +673,15 @@ def run_fallback(session: AgentSession) -> AgentResult:
         model = PHEN_TO_MODEL.get(plan.phenomenon, "projectile")
     # Gravity-as-ruler only when not measuring g and still uncalibrated.
     target_q = str((plan.target_quantity or {}).get("quantity", "")).lower()
-    wants_g = "g" == target_q or target_q.startswith("grav") or "what is g" in session.question.lower()
+    import re as _re
+    wants_g = ("g" == target_q or target_q.startswith("grav") or "gravity" in session.question.lower()
+               or bool(_re.search(r"\bg\b", session.question.lower())))
     if not calibrated and not wants_g and model in ("free_fall", "projectile", "bounce"):
         try:
             t0 = time.time()
             o = session.tool_calibrate_from_gravity(track.id)
-            session._trace(step, "calibrate_from_gravity", {"track_id": track.id}, json.dumps(o)[:400],
-                           int((time.time() - t0) * 1000))
+            session._trace(step, "calibrate_from_gravity", {"track_id": track.id}, json.dumps(o)[:2000],
+                           int((time.time() - t0) * 1000), result=o)
             calibrated = True
         except Exception:
             pass
@@ -516,13 +689,15 @@ def run_fallback(session: AgentSession) -> AgentResult:
         session.calibration = calib_mod.none()
     t0 = time.time()
     # Pendulum length option from spoken/facts is not parsed; keep model defaults.
-    fit_out = session.tool_fit_model(track.id, model)
-    session._trace(step, "fit_model", {"track_id": track.id, "model": model}, json.dumps(fit_out)[:400],
-                   int((time.time() - t0) * 1000))
+    tw = plan.time_window_s if getattr(plan, "time_window_s", None) else None
+    fit_out = (session.tool_fit_model(track.id, model, float(tw[0]), float(tw[1]))
+               if tw and len(tw) == 2 else session.tool_fit_model(track.id, model))
+    session._trace(step, "fit_model", {"track_id": track.id, "model": model}, json.dumps(fit_out)[:2000],
+                   int((time.time() - t0) * 1000), result=fit_out)
     fit = session.fits[-1] if session.fits else None
     answer = _primary_answer(fit, plan, session.question, session.calibration)
     session.answer = answer
-    session._trace(step, "finish", {}, answer["headline"], 0)
+    session._trace(step, "finish", {}, answer["headline"], 0, result=answer)
     try:
         session.emit({"type": "answer", "answer": answer})
     except Exception:
@@ -532,9 +707,13 @@ def run_fallback(session: AgentSession) -> AgentResult:
 
 
 def run_agent(client, video_path, plan: Plan, question: str, facts: dict | None,
-              fps: float, width: int = 0, height: int = 0, emit=None) -> AgentResult:
+              fps: float, width: int = 0, height: int = 0, emit=None,
+              pre_tracked: dict | None = None, pre_summary: str = "") -> AgentResult:
     """Run the Spark agent; on any failure (or offline) run the deterministic fallback."""
-    session = AgentSession(client, video_path, plan, question, facts, fps, width, height, emit)
+    session = AgentSession(client, video_path, plan, question, facts, fps, width, height, emit,
+                           pre_tracked=pre_tracked, pre_summary=pre_summary)
+    for _tr in list(session.tracks.values()):
+        session._emit_track(_tr)
     if os.environ.get("PHYSICAM_OFFLINE") == "1":
         result = run_fallback(session)
         result.used_fallback = True

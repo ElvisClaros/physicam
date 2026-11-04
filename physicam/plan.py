@@ -27,6 +27,7 @@ class MovingObject:
     role: str = "moving"
     description: str = ""
     standard_size_m: float | None = None
+    sam_prompts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -64,7 +65,12 @@ class Plan:
         return cls(
             experiment=str(d.get("experiment", "")),
             phenomenon=str(d.get("phenomenon", "other")),
-            moving_objects=[MovingObject(**{k: m.get(k) for k in ("sam_prompt", "role", "description", "standard_size_m")})
+            moving_objects=[MovingObject(sam_prompt=str(m.get("sam_prompt", "")),
+                                         role=str(m.get("role", "moving")),
+                                         description=str(m.get("description", "")),
+                                         standard_size_m=m.get("standard_size_m"),
+                                         sam_prompts=([str(p) for p in m["sam_prompts"] if p] if len(m.get("sam_prompts") or []) >= 2
+                                                      else default_sam_prompts(str(m.get("sam_prompt", "")))))
                             for m in (d.get("moving_objects") or []) if isinstance(m, dict) and m.get("sam_prompt")],
             reference_candidates=[ReferenceCandidate(**{k: r.get(k) for k in ("sam_prompt", "real_size_m", "dimension", "confidence", "why") if k in r})
                                   for r in (d.get("reference_candidates") or []) if isinstance(r, dict) and r.get("sam_prompt")],
@@ -88,7 +94,7 @@ class Plan:
         return {
             "experiment": self.experiment,
             "phenomenon": self.phenomenon,
-            "objects": [{"sam_prompt": o.sam_prompt, "role": o.role} for o in self.moving_objects],
+            "objects": [{"sam_prompt": o.sam_prompt, "sam_prompts": (o.sam_prompts or [o.sam_prompt]), "role": o.role} for o in self.moving_objects],
             "moving_objects": [asdict(o) for o in self.moving_objects],
             "reference_candidates": [asdict(r) for r in self.reference_candidates],
             "reference": ref,
@@ -103,6 +109,17 @@ class Plan:
             "target_quantity": self.target_quantity,
             "notes": self.spoken_facts,
         }
+
+
+def default_sam_prompts(prompt: str) -> list[str]:
+    """Generate 2-4 short candidate SAM prompts from one prompt."""
+    words = str(prompt or "").split()
+    out: list[str] = []
+    for cand in [" ".join(words), " ".join(words[1:]), " ".join(words[-2:]), words[-1] if words else ""]:
+        cand = cand.strip()
+        if cand and len(cand.split()) <= 3 and cand not in out:
+            out.append(cand)
+    return out[:4] or [str(prompt)]
 
 
 def normalize_facts(facts: dict | None) -> dict:
@@ -165,8 +182,9 @@ def _schema() -> dict:
                 "properties": {
                     "sam_prompt": {"type": "string"}, "role": {"type": "string"},
                     "description": {"type": "string"},
-                    "standard_size_m": {"type": ["number", "null"]}},
-                "required": ["sam_prompt", "role", "description", "standard_size_m"]}},
+                    "standard_size_m": {"type": ["number", "null"]},
+                    "sam_prompts": {"type": "array", "items": {"type": "string"}}},
+                "required": ["sam_prompt", "role", "description", "standard_size_m", "sam_prompts"]}},
             "reference_candidates": {"type": "array", "items": {
                 "type": "object", "additionalProperties": False,
                 "properties": {
@@ -208,11 +226,13 @@ def heuristic_plan(question: str, facts: dict | None = None) -> Plan:
     else:
         phen, model = "free_fall", "projectile"
     prompt = "red ball" if "ball" in q else "moving object"
+    candidates = [prompt] + (["ball"] if "ball" in q else ["object"])
     target = {"quantity": "coefficient of restitution", "unit": ""} if phen == "bounce" and "restitution" in q else \
         {"quantity": "g", "unit": "m/s^2"} if "g" in q.split() or "gravity" in q else {"quantity": "", "unit": ""}
     plan = Plan(experiment=f"Measure {target['quantity'] or phen} from video",
                 phenomenon=phen, moving_objects=[MovingObject(sam_prompt=prompt, role="moving",
-                                                              description="primary moving object")],
+                                                              description="primary moving object",
+                                                              sam_prompts=candidates[:4])],
                 recommended_model=model, target_quantity=target)
     return apply_facts(plan, nf)
 
@@ -239,8 +259,9 @@ def plan_experiment(client, proxy_video_path, question: str, facts: dict | None 
         f"User question: {question}\n"
         f"User-provided facts (override everything else): {json.dumps(nf)}\n\n"
         "Watch and listen: narration may state lengths, fps or other facts - put them in spoken_facts.\n"
-        "For moving_objects give ONE short visually distinctive noun phrase per object for a "
-        "segmentation model: colour + object, e.g. \"red ball\" or \"yellow tennis ball\". "
+        "For moving_objects give sam_prompt as ONE short phrase of 1-3 words (colour/material + noun, "
+        "e.g. \"red ball\", \"metal ball\", \"spring\") and sam_prompts with 2-4 candidate prompts per object, "
+        "each also 1-3 words. Long descriptive prompts fail. "
         "Avoid commands, lists and negation. Set standard_size_m only for objects of truly standard size.\n"
         "For reference_candidates list roughly static visible objects of standard known size.\n"
         f"{KNOWN_SIZES}\n"

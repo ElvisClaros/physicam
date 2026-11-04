@@ -30,12 +30,14 @@ class Fit:
     r2: float
     rmse_px: float
     n_points: int
-    curve: dict = field(default_factory=dict)  # {t, x?, y?}
+    curve: dict = field(default_factory=dict)  # {t, x, y}
     residuals: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
     segments: list = field(default_factory=list)
     restitution: list = field(default_factory=list)
     impact_times: list = field(default_factory=list)
+    impacts: list = field(default_factory=list)
+    info: dict = field(default_factory=dict)
     id: str = ""
 
     def to_dict(self) -> dict:
@@ -43,7 +45,8 @@ class Fit:
                 "t_range": self.t_range, "params": self.params, "r2": self.r2,
                 "rmse_px": self.rmse_px, "n_points": self.n_points, "curve": self.curve,
                 "residuals": self.residuals, "warnings": self.warnings, "segments": self.segments,
-                "restitution": self.restitution, "impact_times": self.impact_times}
+                "restitution": self.restitution, "impact_times": self.impact_times,
+                "impacts": self.impacts, "info": self.info}
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +112,25 @@ def _param(value_px, stderr_px, unit_px, calib: Calibration, unit_m, scale_pow=1
     return {"value": v, "stderr": abs(v) * rel, "unit": unit_m}
 
 
+def _smoothed_other_axis(track: Track, tc: np.ndarray, axis: str) -> list[float]:
+    """Track position on *axis* smoothed (5-pt) and interpolated at *tc*."""
+    src_t = np.asarray(track.t, dtype=float)
+    src = np.asarray(track.x if axis == "x" else track.y, dtype=float)
+    if len(src) >= 5:
+        kernel = np.ones(5) / 5.0
+        sm = np.convolve(src, kernel, mode="same")
+        sm[:2], sm[-2:] = src[:2], src[-2:]
+    else:
+        sm = src
+    return [float(v) for v in np.interp(tc, src_t, sm)]
+
+
+def _track_pos_at(track: Track, t_query: float) -> tuple[float, float]:
+    """Interpolated track (x, y) at *t_query*."""
+    return (float(np.interp(t_query, track.t, track.x)),
+            float(np.interp(t_query, track.t, track.y)))
+
+
 def _structure_warning(resid, t, warnings):
     if len(resid) >= 8:
         # Lag-1 autocorrelation as a cheap structure detector.
@@ -159,7 +181,8 @@ def fit_projectile(track: Track, calib: Calibration | None = None, t_range=None,
         "vx": _param(vx_px, vx_err, "px/s", calib, "m/s", 1),
         "vy0": _param(vy0_px, vy_err, "px/s", calib, "m/s", 1),
         "speed": _param(speed_px, math.hypot(vx_err, vy_err), "px/s", calib, "m/s", 1),
-        "angle_deg": {"value": math.degrees(math.atan2(-vy0_px, vx_px)), "stderr": 0.0, "unit": "deg"},
+        "angle_deg": {"value": math.degrees(math.atan2(-vy0_px, vx_px)),
+                      "stderr": float(math.degrees(math.hypot(vy_err * abs(vx_px), vx_err * abs(vy0_px)) / max(speed_px ** 2, 1e-12))) if speed_px else 0.0, "unit": "deg"},
         "x0": {"value": float(cx[1]), "stderr": float(ex[1]) if len(ex) > 1 else 0.0, "unit": "px"},
         "y0": {"value": float(cy[2]), "stderr": float(ey[2]) if len(ey) > 2 else 0.0, "unit": "px"},
     }
@@ -236,10 +259,13 @@ def fit_polynomial(track, calib=None, t_range=None, options=None) -> Fit:
     params = {f"c{i}": {"value": float(coeffs[deg - i]), "stderr": float(errs[deg - i]) if len(errs) > deg - i else 0.0,
                         "unit": f"px/s^{i}"} for i in range(deg + 1)}
     tc = np.linspace(t[0], t[-1], 100)
-    curve = {"t": [float(v) for v in tc], axis: [float(v) for v in np.polyval(coeffs, tc)]}
+    other = "y" if axis == "x" else "x"
+    curve = {"t": [float(v) for v in tc], axis: [float(v) for v in np.polyval(coeffs, tc)],
+             other: _smoothed_other_axis(track, tc, other)}
     return Fit(model="polynomial", track_id=track.id, t_range=[float(t[0]), float(t[-1])],
                params=params, r2=r2, rmse_px=rmse, n_points=int(len(t)), curve=curve,
-               residuals=[round(float(v), 4) for v in (yy - yfit)], warnings=[])
+               residuals=[round(float(v), 4) for v in (yy - yfit)], warnings=[],
+               info={"axis": axis})
 
 
 # ---------------------------------------------------------------------------
@@ -290,16 +316,17 @@ def _fit_damped(track, calib, t_range, model_name, options=None) -> Fit:
     resid = s - sfit
     _structure_warning(resid, t, warnings)
     params = {
-        "period": _param(T, eT, "s", calib, "s", 0) if False else {"value": float(T), "stderr": float(eT), "unit": "s"},
         "T": {"value": float(T), "stderr": float(eT), "unit": "s"},
         "omega": {"value": float(omega), "stderr": float(eomega), "unit": "rad/s"},
         "gamma": {"value": float(gamma), "stderr": float(egamma), "unit": "1/s"},
         "amplitude": _param(A, eA, "px", calib, "m", 1),
-        "axis": {"value": axis_name, "stderr": 0.0, "unit": ""},
     }
+    info = {"axis": axis_name}
     if model_name == "pendulum":
         Q = omega / (2 * gamma) if gamma > 1e-12 else float("inf")
-        params["Q"] = {"value": float(Q), "stderr": 0.0, "unit": ""}
+        q_err = float(abs(Q) * math.hypot(eomega / omega if omega else 0.0,
+                                          egamma / gamma if gamma > 1e-12 else 0.0)) if math.isfinite(Q) else 0.0
+        params["Q"] = {"value": float(Q), "stderr": q_err, "unit": ""}
         L = options.get("length_m") or options.get("L")
         if L:
             # g = 4 pi^2 L / T^2 with finite-amplitude correction using amplitude angle.
@@ -319,14 +346,18 @@ def _fit_damped(track, calib, t_range, model_name, options=None) -> Fit:
         omega0_fit = math.sqrt(max(omega ** 2 + gamma ** 2, 0.0))
         zeta = gamma / omega0_fit if omega0_fit else 0.0
         params["omega0"] = {"value": float(omega0_fit), "stderr": float(eomega), "unit": "rad/s"}
-        params["zeta"] = {"value": float(zeta), "stderr": 0.0, "unit": ""}
+        zeta_err = float(abs(zeta) * math.hypot(egamma / gamma if gamma > 1e-12 else 0.0,
+                                                eomega / omega0_fit if omega0_fit else 0.0)) if zeta else float(egamma / omega0_fit) if omega0_fit else 0.0
+        params["zeta"] = {"value": float(zeta), "stderr": zeta_err, "unit": ""}
         params["k_over_m"] = {"value": float(omega0_fit ** 2), "stderr": float(2 * omega0_fit * eomega), "unit": "1/s^2"}
     tc = np.linspace(t[0], t[-1], 200)
     sc = model(tc - t[0], *popt)
-    curve = {"t": [float(v) for v in tc], axis_name: [float(v) for v in sc]}
+    other = "y" if axis_name == "x" else "x"
+    curve = {"t": [float(v) for v in tc], axis_name: [float(v) for v in sc],
+             other: _smoothed_other_axis(track, tc, other), "axis": axis_name}
     return Fit(model=model_name, track_id=track.id, t_range=[float(t[0]), float(t[-1])],
                params=params, r2=r2, rmse_px=rmse, n_points=int(len(t)), curve=curve,
-               residuals=[round(float(v), 4) for v in resid], warnings=warnings)
+               residuals=[round(float(v), 4) for v in resid], warnings=warnings, info=info)
 
 
 def fit_pendulum(track, calib=None, t_range=None, options=None) -> Fit:
@@ -404,6 +435,7 @@ def fit_bounce(track: Track, calib: Calibration | None = None, t_range=None,
     all_resid: list[float] = []
     curve_t: list[float] = []
     curve_y: list[float] = []
+    curve_x: list[float] = []
     apex_heights: list[float] = []
 
     for s_idx in range(len(bounds_t) - 1):
@@ -413,7 +445,7 @@ def fit_bounce(track: Track, calib: Calibration | None = None, t_range=None,
         lo = t0 + (trim if s_idx > 0 else 0.0)
         hi = t1 - (trim if s_idx < len(bounds_t) - 2 else 0.0)
         sel = (t_all >= lo) & (t_all <= hi)
-        tt, yy = t_all[sel], y_all[sel]
+        tt, yy, xx = t_all[sel], y_all[sel], x_all[sel]
         seg: dict = {"index": s_idx, "t_range": [float(t0), float(t1)], "n_points": int(len(tt))}
         if len(tt) < 5:
             seg["warnings"] = [f"only {len(tt)} points in flight"]
@@ -461,6 +493,14 @@ def fit_bounce(track: Track, calib: Calibration | None = None, t_range=None,
         tc = np.linspace(tt[0], tt[-1], max(10, len(tt)))
         curve_t.extend([float(v) for v in tc])
         curve_y.extend([float(v) for v in np.polyval(coeffs, tc)])
+        try:
+            cx_seg, _, _ = _robust_polyfit(tt, xx, 1)
+        except Exception:
+            cx_seg = np.array([0.0, float(xx[0]) if len(xx) else 0.0])
+        seg["curve"] = {"t": [float(v) for v in tc],
+                        "x": [float(v) for v in np.polyval(cx_seg, tc)],
+                        "y": [float(v) for v in np.polyval(coeffs, tc)]}
+        curve_x.extend([float(v) for v in np.polyval(cx_seg, tc)])
 
     # Restitution per impact: fitted velocities either side; cross-check heights.
     seg_by_index = {s["index"]: s for s in segments}
@@ -473,10 +513,7 @@ def fit_bounce(track: Track, calib: Calibration | None = None, t_range=None,
             cb, ca = before["coeffs"], after["coeffs"]
             v_before = float(2 * cb[0] * it + cb[1])  # dy/dt, positive = falling
             v_after = float(2 * ca[0] * it + ca[1])  # negative = rising
-            if before.get("excluded_from_pool") or after.get("excluded_from_pool"):
-                entry["valid"] = False
-                entry["warning"] = "neighbouring flight excluded from pool; restitution unreliable"
-            elif v_before > 0 and v_after < 0:
+            if v_before > 0 and v_after < 0:
                 e = abs(v_after) / v_before
                 if e > 1.05:
                     entry["valid"] = False
@@ -491,6 +528,9 @@ def fit_bounce(track: Track, calib: Calibration | None = None, t_range=None,
                 e_err = e * math.hypot(va_err / abs(v_after) if v_after else 0, vb_err / v_before if v_before else 0)
                 entry.update({"e": float(e), "e_stderr": float(e_err),
                               "v_before_px_s": v_before, "v_after_px_s": v_after})
+                if before.get("excluded_from_pool") or after.get("excluded_from_pool"):
+                    entry["valid"] = False
+                    entry["warning"] = (entry.get("warning", "") + " neighbouring flight excluded from pool; restitution unreliable").strip()
             else:
                 entry["warning"] = f"velocity signs unexpected at impact (v_before={v_before:.1f}, v_after={v_after:.1f})"
         # Height cross-check: e_h = sqrt(h_next / h_prev) using adjacent flight apex heights.
@@ -534,12 +574,25 @@ def fit_bounce(track: Track, calib: Calibration | None = None, t_range=None,
         if "e" in entry and entry.get("valid", True):
             params[f"e_{i}"] = {"value": entry["e"], "stderr": entry.get("e_stderr", 0.0), "unit": ""}
     order = np.argsort(curve_t)
-    curve = {"t": [curve_t[i] for i in order], "y": [curve_y[i] for i in order]} if curve_t else {}
+    curve = {"t": [curve_t[i] for i in order], "x": [curve_x[i] for i in order],
+             "y": [curve_y[i] for i in order]} if curve_t else {}
+    impacts: list[dict] = []
+    for entry in restitution:
+        it = float(entry["t"])
+        ix, iy = _track_pos_at(track, it)
+        impacts.append({
+            "t": it, "x": ix, "y": iy,
+            "e": float(entry["e"]) if "e" in entry else None,
+            "e_stderr": float(entry.get("e_stderr", 0.0)) if "e" in entry else None,
+            "e_height": float(entry["e_height"]) if "e_height" in entry else None,
+            "valid": bool(entry.get("valid", False)) if "e" in entry else False,
+        })
     fit = Fit(model="bounce", track_id=track.id, t_range=[float(t_all[0]), float(t_all[-1])],
               params=params, r2=float(segments[0].get("r2", 0.0)) if segments else 0.0,
               rmse_px=rmse_all, n_points=int(len(t_all)), curve=curve,
               residuals=[round(float(v), 4) for v in all_resid], warnings=warnings,
-              segments=segments, restitution=restitution, impact_times=impact_times)
+              segments=segments, restitution=restitution, impact_times=impact_times,
+              impacts=impacts, info={"axis": "y"})
     return fit
 
 

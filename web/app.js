@@ -38,6 +38,22 @@ function fmt(n, digits = 3) {
   if (n == null || !isFinite(n)) return "—";
   return Number(n).toPrecision(digits);
 }
+/** Value ± uncertainty: 2 sig digits on uncertainty, matching decimals on value. */
+function fmtPair(value, unc) {
+  if (value == null || !isFinite(value)) return "—";
+  if (unc == null || !isFinite(unc) || unc === 0) return `${fmt(value, 4)} ± —`;
+  const places = 1 - Math.floor(Math.log10(Math.abs(unc)));
+  const factor = Math.pow(10, places);
+  const ru = Math.round(unc * factor) / factor;
+  const rv = Math.round(value * factor) / factor;
+  if (places >= 0) return `${rv.toFixed(places)} ± ${ru.toFixed(places)}`;
+  return `${rv} ± ${ru}`;
+}
+function fmtParam(p) {
+  if (!p || p.value == null || !isFinite(p.value)) return "—";
+  if (p.stderr == null || !isFinite(p.stderr) || p.stderr === 0) return `${fmt(p.value, 5)} ± —`;
+  return fmtPair(p.value, p.stderr);
+}
 function esc(s) {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -46,7 +62,10 @@ function effectiveFps() {
   if (isFinite(override) && override > 0) return override;
   return state.result?.video?.fps || 30;
 }
-function calibration() { return state.result?.calibration?.m_per_px ? state.result.calibration : null; }
+function calibration() {
+  const c = state.result?.calibration;
+  return c?.m_per_px && c.method !== "none" ? c : null;
+}
 function toMeters(px) { const c = calibration(); return c ? px * c.m_per_px : null; }
 
 function trackColor(track, idx) {
@@ -167,12 +186,13 @@ function addTraceRow(trace) {
   const meta = traceMeta(trace);
   const row = document.createElement("div");
   row.className = "trow";
-  const detail = JSON.stringify({ args: trace.args ?? {}, summary: trace.summary ?? "" }, null, 1);
+  let detail = JSON.stringify({ args: trace.args ?? {}, summary: trace.summary ?? "" }, null, 1);
+  if (detail.length > 1200) detail = detail.slice(0, 1200) + "\n…";
   const ms = trace.ms != null ? `${Math.round(trace.ms)} ms` : "";
   row.innerHTML =
     `<div class="trow-top"><span class="ticon">${ICONS[meta.icon] || ICONS.plan}</span>` +
     `<span class="tbadge ${meta.badge}">${meta.badge}</span>` +
-    `<span class="tsummary">${esc(trace.summary || trace.name || "")}</span>` +
+    `<span class="tsummary">${esc(trace.title || trace.summary || trace.name || "")}</span>` +
     `<span class="tms">${esc(ms)}</span></div>` +
     `<details><summary>${esc(trace.name || trace.kind || "step")} details</summary><pre>${esc(detail)}</pre></details>`;
   // Insert above the running spinner row so the spinner stays last/alive
@@ -265,6 +285,8 @@ function isDimensionless(unit) {
 
 function eHeightCrossCheck() {
   for (const fit of state.fits) {
+    const fromImpacts = (fit.impacts || []).find((im) => im.e_height != null && im.valid !== false);
+    if (fromImpacts) return { value: fromImpacts.e_height, stderr: null };
     const raw = fit.e_height ?? fit.params?.e_height ?? fit.params?.eHeight;
     if (raw == null) continue;
     if (typeof raw === "number" && isFinite(raw)) return { value: raw, stderr: null };
@@ -282,7 +304,7 @@ function renderAnswer(answer, animate = true) {
   const dimensionless = isDimensionless(answer.unit);
   const unitHtml = dimensionless ? "" : ` <span class="unit">${esc(answer.unit || "")}</span>`;
   value.innerHTML = showValue
-    ? `${fmt(answer.value, 4)} <span class="plusminus">± ${fmt(answer.uncertainty, 3)}</span>${unitHtml}`
+    ? `${esc(fmtPair(answer.value, answer.uncertainty))}${unitHtml}`
     : esc(answer.headline || "");
   if (animate) {
     value.classList.remove("count-up");
@@ -315,32 +337,52 @@ function countUp(el, answer) {
   const tick = (now) => {
     const k = Math.min(1, (now - t0) / dur);
     const eased = 1 - Math.pow(1 - k, 3);
-    el.innerHTML = `${fmt(target * eased, 4)} <span class="plusminus">± ${fmt(unc * eased, 3)}</span>${unitHtml}`;
+    el.innerHTML = `${esc(fmtPair(target * eased, unc * eased))}${unitHtml}`;
     if (k < 1) requestAnimationFrame(tick);
     else if (state.result.answer) renderAnswer(state.result.answer, false);
   };
   requestAnimationFrame(tick);
 }
 
+function metricNote(p) {
+  const cal = calibration();
+  if (!cal || !p || !String(p.unit || "").startsWith("px")) return "";
+  const unit = String(p.unit).replace(/^px/, "m");
+  return ` (= ${fmtPair(p.value * cal.m_per_px, (p.stderr || 0) * cal.m_per_px)} ${esc(unit)})`;
+}
+function fitBlockHtml(fit) {
+  try {
+    const rows = Object.entries(fit.params || {}).map(([name, p]) =>
+      `<tr><td>${esc(name)}</td><td class="num">${esc(fmtParam(p))}${metricNote(p)}</td>` +
+      `<td>${esc(p.unit || "")}</td></tr>`).join("");
+    const info = Object.entries(fit.info || {}).map(([k, v]) =>
+      `<tr><td>${esc(k)}</td><td class="num">${esc(String(v))}</td><td></td></tr>`).join("");
+    const warnings = (fit.warnings || []).map((w) => `<span class="warn-chip">${esc(w)}</span>`).join("");
+    return `<div class="fit-title">${esc(fit.id || "")} · ${esc(fit.model || "")} · track ${esc(fit.track_id || "")}` +
+      ` · R² = ${fmt(fit.r2, 4)} · RMSE = ${fmt(fit.rmse_px, 3)} px · n = ${fit.n_points ?? "—"}</div>` +
+      ((rows || info) ? `<table class="params"><thead><tr><th>Parameter</th><th>Value ± stderr</th><th>Unit</th></tr></thead><tbody>${rows}${info}</tbody></table>` : "") +
+      (warnings ? `<div>${warnings}</div>` : "");
+  } catch { return `<div class="fit-title">${esc(fit.id || "fit")} (could not render)</div>`; }
+}
 function renderFits() {
   const wrap = $("fits-wrap");
   if (!state.fits.length) { wrap.hidden = true; return; }
   wrap.hidden = false;
   const box = $("fits");
   box.innerHTML = "";
-  for (const fit of state.fits) {
-    const block = document.createElement("div");
-    block.className = "fit-block";
-    const rows = Object.entries(fit.params || {}).map(([name, p]) =>
-      `<tr><td>${esc(name)}</td><td class="num">${fmt(p.value, 5)} ± ${fmt(p.stderr, 3)}</td>` +
-      `<td>${esc(p.unit || "")}</td></tr>`).join("");
-    const warnings = (fit.warnings || []).map((w) => `<span class="warn-chip">${esc(w)}</span>`).join("");
-    block.innerHTML =
-      `<div class="fit-title">${esc(fit.id || "")} · ${esc(fit.model || "")} · track ${esc(fit.track_id || "")}` +
-      ` · R² = ${fmt(fit.r2, 4)} · RMSE = ${fmt(fit.rmse_px, 3)} px · n = ${fit.n_points ?? "—"}</div>` +
-      (rows ? `<table class="params"><thead><tr><th>Parameter</th><th>Value ± stderr</th><th>Unit</th></tr></thead><tbody>${rows}</tbody></table>` : "") +
-      (warnings ? `<div>${warnings}</div>` : "");
-    box.appendChild(block);
+  const primaryId = state.result?.answer?.fit_ids?.[0];
+  const primary = state.fits.find((f) => f.id === primaryId) || state.fits[0];
+  const others = state.fits.filter((f) => f !== primary);
+  const block = document.createElement("div");
+  block.className = "fit-block";
+  block.innerHTML = fitBlockHtml(primary);
+  box.appendChild(block);
+  if (others.length) {
+    const det = document.createElement("details");
+    det.className = "fit-block";
+    det.innerHTML = `<summary>Other fits (${others.length})</summary>` +
+      others.map((f) => fitBlockHtml(f)).join("");
+    box.appendChild(det);
   }
 }
 
@@ -375,16 +417,26 @@ function renderLegend() {
   }
 }
 
-/** Interpolated value of a fit curve at time t (curve.t sorted). */
-function curveAt(curve, t) {
-  if (!curve || !curve.t || !curve.t.length) return NaN;
-  const ts = curve.t;
-  if (t <= ts[0]) return curve.y[0];
-  if (t >= ts[ts.length - 1]) return curve.y[curve.y.length - 1];
+/** Interpolated value of a fit curve at time t (curve.t sorted). Missing axis -> NaN. */
+function curveAt(curve, t, axis = "y") {
+  if (!curve || !curve.t || !curve.t.length || !curve[axis] || !curve[axis].length) return NaN;
+  const ts = curve.t, ys = curve[axis];
+  if (t <= ts[0]) return ys[0];
+  if (t >= ts[ts.length - 1]) return ys[ys.length - 1];
   let lo = 0, hi = ts.length - 1;
   while (hi - lo > 1) { const mid = (lo + hi) >> 1; (ts[mid] <= t) ? lo = mid : hi = mid; }
   const k = (t - ts[lo]) / (ts[hi] - ts[lo] || 1);
-  return curve.y[lo] + k * (curve.y[hi] - curve.y[lo]);
+  return ys[lo] + k * (ys[hi] - ys[lo]);
+}
+function trackPosAt(track, t, axis) {
+  const ts = track?.t || [], vs = track?.[axis] || [];
+  if (!ts.length || !vs.length) return 0;
+  if (t <= ts[0]) return vs[0];
+  if (t >= ts[ts.length - 1]) return vs[vs.length - 1];
+  let lo = 0, hi = ts.length - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; (ts[mid] <= t) ? lo = mid : hi = mid; }
+  const k = (t - ts[lo]) / (ts[hi] - ts[lo] || 1);
+  return vs[lo] + k * (vs[hi] - vs[lo]);
 }
 
 function restitutionBars() {
@@ -493,18 +545,20 @@ function renderCharts(cursorT = null) {
     }
   }
   for (const fit of state.fits) {
-    const track = state.tracks.get(fit.track_id);
-    if (!track) continue;
-    const color = trackColor(track, [...state.tracks.keys()].indexOf(fit.track_id));
-    const { fromPx } = heightOf.get(fit.track_id);
-    const curves = (fit.segments && fit.segments.length)
-      ? fit.segments.map((s) => s.curve).filter(Boolean)
-      : (fit.curve ? [fit.curve] : []);
-    for (const c of curves) {
-      if (!c || !c.t) continue;
-      const cy = curveHeights(c, track, fromPx);
-      if (cy) ySeries.push({ x: c.t, y: cy, color, dashed: true, width: 1.4 });
-    }
+    try {
+      const track = state.tracks.get(fit.track_id);
+      if (!track) continue;
+      const color = trackColor(track, [...state.tracks.keys()].indexOf(fit.track_id));
+      const { fromPx } = heightOf.get(fit.track_id);
+      const curves = (fit.segments && fit.segments.length)
+        ? fit.segments.map((s) => s.curve).filter(Boolean)
+        : (fit.curve ? [fit.curve] : []);
+      for (const c of curves) {
+        if (!c || !c.t) continue;
+        const cy = curveHeights(c, track, fromPx);
+        if (cy) ySeries.push({ x: c.t, y: cy, color, dashed: true, width: 1.4 });
+      }
+    } catch { /* one bad fit must not blank the charts */ }
   }
   drawLineChart($("chart-y"), { series: ySeries, xLabel: "t (s)", yLabel: `height (${heightUnit})` }, t);
   drawLineChart($("chart-y-resid"), { series: residSeries, xLabel: "t (s)", yLabel: `resid (${heightUnit})` }, t);
@@ -525,17 +579,23 @@ function curveHeights(curve, track, fromPx) {
 }
 
 function curveHeightAt(fit, t, track, fromPx) {
-  const curves = (fit.segments && fit.segments.length)
-    ? fit.segments.map((s) => s.curve).filter(Boolean) : (fit.curve ? [fit.curve] : []);
-  for (const c of curves) {
-    if (!c || !c.t || !c.t.length) continue;
-    if (t < c.t[0] || t > c.t[c.t.length - 1]) continue;
-    const direct = c.Y_m || c.y_m;
-    if (direct) { const saved = c.y; c.y = direct; const v = curveAt(c, t); c.y = saved; return v; }
-    return fromPx(curveAt(c, t));
-  }
-  const v = fit.curve ? curveAt(fit.curve, t) : NaN;
-  return isFinite(v) ? fromPx(v) : NaN;
+  try {
+    const curves = (fit.segments && fit.segments.length)
+      ? fit.segments.map((s) => s.curve).filter(Boolean) : (fit.curve ? [fit.curve] : []);
+    for (const c of curves) {
+      if (!c || !c.t || !c.t.length) continue;
+      if (t < c.t[0] || t > c.t[c.t.length - 1]) continue;
+      const direct = c.Y_m || c.y_m;
+      if (direct && direct.length) {
+        const tmp = { t: c.t, y: direct };
+        return curveAt(tmp, t, "y");
+      }
+      if (!c.y || !c.y.length) continue;
+      return fromPx(curveAt(c, t, "y"));
+    }
+    const v = fit.curve ? curveAt(fit.curve, t, "y") : NaN;
+    return isFinite(v) ? fromPx(v) : NaN;
+  } catch { return NaN; }
 }
 
 function renderAll(animateAnswer = false) {
@@ -606,6 +666,7 @@ function drawOverlay() {
       ctx.strokeStyle = color; ctx.globalAlpha = 0.85; ctx.lineWidth = 1.6;
       ctx.setLineDash([7, 6]);
       for (const fit of state.fits) {
+        try {
         if (fit.track_id !== track.id) continue;
         const curves = (fit.segments && fit.segments.length)
           ? fit.segments.map((s) => s.curve).filter(Boolean)
@@ -613,11 +674,16 @@ function drawOverlay() {
         for (const c of curves) {
           if (!c || !c.t) continue;
           ctx.beginPath();
-          c.t.forEach((tt, k) => { const px = PX(c.x ? c.x[k] : curveX(track, tt)), py = PY(c.y[k]); k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); });
+          c.t.forEach((tt, k) => {
+            const px = PX(c.x && c.x[k] != null ? c.x[k] : trackPosAt(track, tt, "x"));
+            const py = PY(c.y && c.y[k] != null ? c.y[k] : trackPosAt(track, tt, "y"));
+            k ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+          });
           ctx.stroke();
         }
         // impact markers
         for (const im of (fit.impacts || [])) {
+          if (im.x == null || im.y == null) continue;
           const px = PX(im.x), py = PY(im.y);
           ctx.setLineDash([]);
           ctx.beginPath(); ctx.moveTo(px - 8, py - 8); ctx.lineTo(px + 8, py + 8);
@@ -627,6 +693,7 @@ function drawOverlay() {
           ctx.font = "11px ui-monospace, monospace";
           ctx.fillText(`impact ${im.index ?? ""}${im.e != null ? `  e=${Number(im.e).toFixed(2)}` : ""}`, px + 11, py - 8);
         }
+        } catch { /* one bad fit must not blank the overlay */ }
       }
       ctx.restore();
     }

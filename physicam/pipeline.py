@@ -30,8 +30,72 @@ def _fit_json(fit, idx: int) -> dict:
     d = fit.to_dict()
     if not d.get("id"):
         d["id"] = f"f{idx}"
-    # UI extensions: impacts with frame-px positions when available.
+    d.setdefault("impacts", [])
+    d.setdefault("info", {})
     return d
+
+
+def _pretrack(client, video_path, plan, fps: float):
+    """Run SAM concurrently on plan candidate prompts; keep tracks found.
+
+    Returns (pre_tracked dict prompt->tracks, summary string). Offline, only
+    prompts with a cached SAM file are tried so no API call is made.
+    """
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path as _P
+
+    from physicam.agent import simplify_sam_prompt
+    from physicam.sam import _sam_cache_path, segment_video
+    from physicam.video import sha256_file
+
+    if client is None:
+        return {}, ""
+    candidates: list[str] = []
+    for obj in (plan.moving_objects or []):
+        for p in (obj.sam_prompts or [obj.sam_prompt]):
+            clean, _ = simplify_sam_prompt(str(p))
+            if clean and clean not in candidates:
+                candidates.append(clean)
+    # Cache-discovered prompts for this exact video (free offline replays).
+    try:
+        data_dir = getattr(getattr(client, "settings", None), "data_dir", "data")
+        sha = sha256_file(video_path)
+        for path in sorted((_P(data_dir) / "cache" / "sam").glob(f"{sha}_*.txt")):
+            slug = path.name[len(sha) + 1:-4]
+            if slug.startswith("prompt_"):
+                continue
+            clean, _ = simplify_sam_prompt(slug.replace("_", " "))
+            if clean and clean not in candidates:
+                candidates.append(clean)
+        if os.environ.get("PHYSICAM_OFFLINE") == "1":
+            candidates = [c for c in candidates if _sam_cache_path(data_dir, sha, c).exists()]
+    except Exception:
+        pass
+    if not candidates:
+        return {}, ""
+
+    def _one(p):
+        try:
+            return p, segment_video(client, video_path, p, fps)
+        except Exception:
+            return p, []
+
+    if len(candidates) == 1:
+        results = [_one(candidates[0])]
+    else:
+        with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as pool:
+            results = list(pool.map(_one, candidates))
+    pre: dict = {}
+    parts: list[str] = []
+    for prompt, tracks in results:
+        kept = [t for t in (tracks or []) if t.n > 0]
+        if kept:
+            pre[prompt] = kept
+            for tr in kept[:2]:
+                parts.append(f"\u201c{tr.label}\u201d: {tr.n} frames ({float(tr.t[0]):.2f}\u2013{float(tr.t[-1]):.2f} s)")
+    summary = ("pre-tracked: " + "; ".join(parts)) if parts else "pre-tracked: none"
+    return pre, summary
 
 
 def run_job(job_dir, video_path, question: str, facts: dict | None = None,
@@ -78,7 +142,7 @@ def run_job(job_dir, video_path, question: str, facts: dict | None = None,
     result: dict = {
         "id": job_id, "status": "running", "question": question,
         "video": {}, "plan": None, "calibration": None,
-        "tracks": [], "fits": [], "answer": None,
+        "tracks": [], "fits": [], "answer": None, "strobe_url": None,
         "report_markdown": "", "trace": [],
         "cost": {"sam_frames": 0, "spark_tokens": 0, "usd_estimate": 0.0},
         "error": None,
@@ -166,7 +230,7 @@ def run_job(job_dir, video_path, question: str, facts: dict | None = None,
         def agent_emit(ev: dict) -> None:
             etype = ev.get("type")
             if etype == "trace":
-                result["trace"].append({k: ev.get(k) for k in ("step", "kind", "name", "args", "summary", "ms")})
+                result["trace"].append({k: ev.get(k) for k in ("step", "kind", "name", "args", "summary", "title", "ms")})
                 _write_result(job_dir, result)
                 safe_emit(ev)
             elif etype == "track" and ev.get("track"):
@@ -199,9 +263,13 @@ def run_job(job_dir, video_path, question: str, facts: dict | None = None,
             else:
                 safe_emit(ev)
 
+        pre_tracked, pre_summary = _pretrack(client, normalized, plan, capture_fps)
+        if pre_summary:
+            safe_emit({"type": "trace", "step": 0, "kind": "tool", "name": "pre_track",
+                       "args": {}, "summary": pre_summary, "title": pre_summary, "ms": 0})
         agent_result = run_agent(client, normalized, plan, question, nf,
                                  fps=capture_fps, width=int(info.width), height=int(info.height),
-                                 emit=agent_emit)
+                                 emit=agent_emit, pre_tracked=pre_tracked, pre_summary=pre_summary)
         # Ensure tracks/fits/calibration/answer are in the result even if the
         # agent emitted nothing (fallback emits too, but be safe).
         if agent_result.tracks and not result["tracks"]:
@@ -225,6 +293,25 @@ def run_job(job_dir, video_path, question: str, facts: dict | None = None,
             safe_emit({"type": "answer", "answer": result["answer"]})
         result["cost"] = cost_now()
         _write_result(job_dir, result)
+
+        # 3b. strobe composite (from cached SAM masks; never calls the API)
+        try:
+            from physicam.strobe import make_strobe
+            data_dir = getattr(getattr(client, "settings", None), "data_dir", "data") if client is not None else "data"
+            all_tracks = list(agent_result.tracks) if agent_result.tracks else []
+            fit_ids = {getattr(f, "track_id", None) for f in (agent_result.fits or [])}
+            strobe_tracks = [t for t in all_tracks if t.id in fit_ids][:2] or all_tracks[:1]
+            if strobe_tracks:
+                spath = make_strobe(normalized, strobe_tracks, job_dir, str(data_dir),
+                                    fits=[f.to_dict() if hasattr(f, "to_dict") else f for f in (agent_result.fits or [])],
+                                    width=int(info.width), height=int(info.height))
+                if spath is not None:
+                    result["strobe_url"] = f"/media/{job_id}/strobe.jpg"
+                    _write_result(job_dir, result)
+                    safe_emit({"type": "strobe", "url": result["strobe_url"],
+                               "strobe_url": result["strobe_url"]})
+        except Exception:
+            pass
 
         # 4. report --------------------------------------------------------
         stage("report")
