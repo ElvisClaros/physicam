@@ -72,9 +72,14 @@ def _specs() -> list[dict]:
         side = mp4.with_suffix(".json")
         if side.exists():
             d = json.loads(side.read_text())
+            facts = dict(d.get("facts") or {})
+            if d.get("reference_csv"):
+                # Resolve relative to the repo root (examples/..).
+                ref = ROOT.parent / str(d["reference_csv"])
+                facts.setdefault("reference_csv", str(ref))
             specs.append({"slug": stem, "video": mp4, "title": d.get("title", stem),
                           "subtitle": d.get("subtitle", ""), "question": d["question"],
-                          "facts": d.get("facts") or {}})
+                          "facts": facts})
     return specs
 
 

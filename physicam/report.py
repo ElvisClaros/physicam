@@ -102,6 +102,12 @@ def compact_result(result: dict) -> dict:
                "calibration": result.get("calibration"), "tracks": tracks,
                "fits": fits, "answer": result.get("answer"),
                "video": {k: (result.get("video") or {}).get(k) for k in ("fps", "width", "height", "n_frames", "duration_s")}}
+    level = result.get("level")
+    if level:
+        lt, lh = level.get("t") or [], level.get("h") or []
+        compact["level"] = {"n": len(lt), "unit": level.get("unit"),
+                            "h_first": lh[0] if lh else None, "h_last": lh[-1] if lh else None,
+                            "bottom_y": level.get("bottom_y"), "hole_y": level.get("hole_y")}
     return _round_floats(compact)
 
 

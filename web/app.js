@@ -803,10 +803,64 @@ function curveHeightAt(fit, t, track, fromPx) {
   } catch { return NaN; }
 }
 
+function interpSeries(xs, ys, x) {
+  if (!xs || !ys || !xs.length) return NaN;
+  if (x <= xs[0]) return ys[0];
+  if (x >= xs[xs.length - 1]) return ys[ys.length - 1];
+  let lo = 0, hi = xs.length - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; (xs[mid] <= x) ? lo = mid : hi = mid; }
+  const k = (x - xs[lo]) / ((xs[hi] - xs[lo]) || 1);
+  return ys[lo] + k * (ys[hi] - ys[lo]);
+}
+
+function renderLevel() {
+  const wrap = $("level-wrap");
+  const level = state.result?.level;
+  if (!level || !level.t || !level.t.length) { if (wrap) wrap.hidden = true; return; }
+  wrap.hidden = false;
+  const unit = level.unit === "m" ? "m" : "px";
+  const tNow = video.currentTime || 0;
+  const fit = (state.fits || []).find((f) => f.model === "draining") || primaryFit();
+  const series = [{ x: level.t, y: level.h, color: "#22d3ee", points: true }];
+  let resid = [];
+  if (fit && fit.model === "draining" && fit.curve && fit.curve.t) {
+    series.push({ x: fit.curve.t, y: fit.curve.h, color: "#f5b544", width: 1.8 });
+    resid = level.t.map((tt, i) => level.h[i] - interpSeries(fit.curve.t, fit.curve.h, tt));
+    const theory = fit.info && fit.info.theory_curve;
+    if (theory && theory.t && theory.h) series.push({ x: theory.t, y: theory.h, color: "#93a5c4", dashed: true, width: 1.4 });
+    const val = fit.info && fit.info.validation;
+    if (val && val.points && val.points.t) {
+      const h0 = level.h[0];
+      series.push({ x: val.points.t, y: val.points.h_norm.map((v) => v * h0), color: "#ff6b6b", points: true, hollow: true });
+    }
+  }
+  drawLineChart($("chart-level"), { series, xLabel: "t (s)", yLabel: `h (${unit})` }, tNow);
+  drawLineChart($("chart-level-resid"), { series: [{ x: level.t, y: resid, color: "#22d3ee", points: true }], xLabel: "t (s)", yLabel: `resid (${unit})` }, tNow);
+  // Times-to-drain table.
+  const tbody = document.querySelector("#level-times-table tbody");
+  const timesWrap = $("level-times-wrap");
+  if (tbody && fit && fit.model === "draining") {
+    const val = (fit.info && fit.info.validation) || {};
+    const refTimes = val.times_ref || {};
+    tbody.innerHTML = [10, 25, 50, 75, 90].map((frac) => {
+      const p = fit.params && fit.params[`t${frac}`];
+      const pv = p && isFinite(p.value) ? `${fmt(p.value, 4)} s` : "—";
+      const rv = refTimes[`t${frac}`] != null && isFinite(refTimes[`t${frac}`]) ? `${fmt(refTimes[`t${frac}`], 4)} s` : "—";
+      return `<tr><td>${frac}%</td><td class="num">${pv}</td><td class="num">${rv}</td></tr>`;
+    }).join("");
+    timesWrap.hidden = false;
+  } else if (timesWrap) timesWrap.hidden = true;
+  const dl = $("level-download");
+  if (dl) {
+    dl.href = rel(state.result.level_csv_url || (state.jobId ? `/api/jobs/${state.jobId}/level.csv` : "#"));
+  }
+}
+
 function renderAll(animateAnswer = false) {
   renderLegend();
   renderFits();
   renderCharts();
+  renderLevel();
   if (state.result.answer) renderAnswer(state.result.answer, animateAnswer);
   if (state.result.report_markdown) renderReport(state.result.report_markdown);
   renderCost(state.result.cost);
@@ -850,7 +904,30 @@ function drawOverlay() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cw, ch);
   const geo = frameGeometry();
-  if (!geo || !state.tracks.size) { updateHud(-1, null, null); return; }
+  if (!geo) { updateHud(-1, null, null); return; }
+  // Liquid-level surface line (even before/without visible tracks).
+  const lvl = state.result?.level;
+  if (lvl && lvl.t && lvl.surface_y) {
+    const tL = video.currentTime || 0;
+    const sy = interpSeries(lvl.t, lvl.surface_y, tL);
+    const hv = interpSeries(lvl.t, lvl.h, tL);
+    if (isFinite(sy)) {
+      const yPx = geo.oy + sy * geo.scale;
+      ctx.save();
+      ctx.strokeStyle = "#22d3ee"; ctx.lineWidth = 2; ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(geo.ox, yPx); ctx.lineTo(geo.ox + geo.fw * geo.scale, yPx); ctx.stroke();
+      const hTxt = lvl.unit === "m" && isFinite(hv) ? `h = ${(hv * 100).toFixed(2)} cm`
+        : (isFinite(hv) ? `h = ${hv.toFixed(1)} px` : "");
+      if (hTxt) {
+        ctx.font = "12px sans-serif";
+        const wT = ctx.measureText(hTxt).width;
+        ctx.fillStyle = "rgba(4,10,20,.78)"; ctx.fillRect(geo.ox + 8, yPx - 22, wT + 10, 17);
+        ctx.fillStyle = "#eaf6fb"; ctx.fillText(hTxt, geo.ox + 13, yPx - 9);
+      }
+      ctx.restore();
+    }
+  }
+  if (!state.tracks.size) { updateHud(-1, null, null); return; }
   const fps = effectiveFps();
   const tNow = video.currentTime || 0;
   const frame = Math.round(tNow * fps);
@@ -1027,9 +1104,10 @@ function syncLoop() {
 }
 let chartTick = 0;
 function renderChartsThrottled() {
-  if (!state.tracks.size || $("charts-wrap").hidden) return;
+  if (!state.tracks.size && !state.result?.level) return;
   if (++chartTick % 3) return; // cursor redraw need not run every frame
-  renderCharts(video.currentTime || 0);
+  if (state.tracks.size && !$("charts-wrap").hidden) renderCharts(video.currentTime || 0);
+  if (state.result?.level) renderLevel();
 }
 
 function startSync() {
@@ -1061,6 +1139,7 @@ function resetJob() {
   if ($("lightbox")) $("lightbox").hidden = true;
   $("fits-wrap").hidden = true;
   $("charts-wrap").hidden = true;
+  if ($("level-wrap")) $("level-wrap").hidden = true;
   $("report-wrap").hidden = true;
   $("cost-line").hidden = true;
   $("track-legend").innerHTML = "";
@@ -1181,6 +1260,7 @@ function handleEvent(ev) {
     state.result.trace.push(trace);
     return;
   }
+  if (type === "level") { state.result.level = ev.level || ev; state.result.level_csv_url = ev.level_csv_url || state.result.level_csv_url; renderLevel(); drawOverlay(); return; }
   if (type === "track") { applyTrack(ev.track || ev); return; }
   if (type === "fit") { applyFit(ev.fit || ev); return; }
   if (type === "answer") {
@@ -1515,7 +1595,7 @@ function initTransport() {
     if (e.key === "ArrowRight") step(1);
   });
   const seek = (t) => { if (isFinite(t)) { video.currentTime = Math.max(0, t); syncLoop(); } };
-  for (const id of ["chart-y", "chart-y-resid", "chart-x", "chart-speed", "chart-e"]) {
+  for (const id of ["chart-y", "chart-y-resid", "chart-x", "chart-speed", "chart-e", "chart-level", "chart-level-resid"]) {
     const canvas = $(id);
     const tip = canvas.parentElement.querySelector(".chart-tip");
     wireChart(canvas, tip, { onSeek: seek });

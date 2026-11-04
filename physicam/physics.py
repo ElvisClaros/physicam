@@ -994,6 +994,520 @@ def fit_bounce(track: Track, calib: Calibration | None = None, t_range=None,
 
 
 # ---------------------------------------------------------------------------
+# draining (Torricelli)
+# ---------------------------------------------------------------------------
+
+G_CGS = 981.0
+DRAIN_FRACTIONS = (10, 25, 50, 75, 90)
+
+
+def torricelli_tf_theory(h0_m: float, container_diameter_m: float, hole_diameter_m: float,
+                         g: float = G_SI) -> float:
+    """Ideal (Cd=1) drain time: sqrt((2h0/g)*(A^2/a^2 - 1)) — the course formula."""
+    A = math.pi * (float(container_diameter_m) / 2.0) ** 2
+    a = math.pi * (float(hole_diameter_m) / 2.0) ** 2
+    return float(math.sqrt((2.0 * float(h0_m) / g) * ((A * A) / (a * a) - 1.0)))
+
+
+def newton_raphson(f, df, x0: float, tol: float = 1e-10, max_iter: int = 100):
+    """Newton-Raphson root find (mirrors the FIUBA course's codigo.py)."""
+    x = float(x0)
+    for _ in range(max_iter):
+        fx, dfx = float(f(x)), float(df(x))
+        if dfx == 0:
+            break
+        x_new = x - fx / dfx
+        if abs(x_new - x) < tol:
+            return float(x_new)
+        x = x_new
+    return float(x)
+
+
+def _torricelli_h(t, h0, k, t0):
+    # h = h0 for t < t0 (not yet draining), then (sqrt(h0)-k(t-t0))^2.
+    # The plateau is what makes h0 and t0 separately identifiable.
+    dt = np.clip(np.asarray(t, dtype=float) - float(t0), 0.0, None)
+    u = np.sqrt(max(float(h0), 0.0)) - float(k) * dt
+    return np.where(u > 0, u ** 2, 0.0)
+
+
+def _fit_torricelli(t, h):
+    """Fit sqrt(h)=sqrt(h0)-k(t-t0); returns (popt, perr, yfit)."""
+    t = np.asarray(t, float); h = np.asarray(h, float)
+    hmax = float(np.max(h)) if len(h) else 1.0
+    dur = float(t[-1] - t[0]) if len(t) > 1 else 1.0
+    p0 = [hmax, math.sqrt(max(hmax, 1e-12)) / max(dur * 0.8, 1e-9), float(t[0])]
+    bounds = ([0.2 * hmax, 1e-12, float(t[0]) - max(dur, 1.0)],
+              [1.5 * hmax, np.inf, float(t[0]) + max(dur, 1.0)])
+    popt, pcov = curve_fit(_torricelli_h, t, h, p0=p0, bounds=bounds, maxfev=40000)
+    perr = np.sqrt(np.diag(pcov)) if pcov is not None and np.all(np.isfinite(pcov)) else np.zeros(3)
+    # h0/t0 are only separately identifiable when a pre-drain plateau is
+    # observed; otherwise the curve depends only on sqrt(h0)+k*t0. Fall
+    # back to t0 = t[0] (draining from the first frame) when the 3-param
+    # covariance is degenerate.
+    if (not np.all(np.isfinite(perr)) or perr[0] > abs(popt[0]) or perr[2] > max(dur, 1.0)):
+        t_fixed = float(t[0])
+
+        def _h2(tt, h0_, k_):
+            return _torricelli_h(tt, h0_, k_, t_fixed)
+
+        try:
+            p2, pc2 = curve_fit(_h2, t, h, p0=[popt[0], popt[1]],
+                                bounds=([0.2 * hmax, 1e-12], [1.5 * hmax, np.inf]), maxfev=40000)
+            e2 = np.sqrt(np.diag(pc2)) if pc2 is not None and np.all(np.isfinite(pc2)) else np.zeros(2)
+            popt = np.array([p2[0], p2[1], t_fixed])
+            perr = np.array([e2[0], e2[1], 0.0])
+        except Exception:
+            pass
+    return popt, perr, _torricelli_h(t, *popt)
+
+
+def _empirical_fits(t, h_norm):
+    """Quadratic/cubic/exponential fits on h/h0 with R^2 (course's fits)."""
+    out = {}
+    for name, deg in (("quadratic", 2), ("cubic", 3)):
+        try:
+            coeffs = np.polyfit(t, h_norm, deg)
+            pred = np.polyval(coeffs, t)
+            r2, _ = _r2_rmse(h_norm, pred)
+            out[name] = {"coeffs": [float(c) for c in coeffs], "r2": float(r2),
+                         "degree": deg}
+        except Exception as exc:
+            out[name] = {"error": str(exc), "r2": None}
+    try:
+        pos = h_norm > 1e-6
+        coeffs_e = np.polyfit(t[pos], np.log(h_norm[pos]), 1)  # log h = b*t + a
+        pred_e = np.exp(np.polyval(coeffs_e, t))
+        r2e, _ = _r2_rmse(h_norm, pred_e)
+        out["exponential"] = {"coeffs": [float(coeffs_e[1]), float(coeffs_e[0])],
+                              "r2": float(r2e), "form": "exp(a+b*t)"}
+    except Exception as exc:
+        out["exponential"] = {"error": str(exc), "r2": None}
+    return out
+
+
+def _times_from_cubic(coeffs, fractions=DRAIN_FRACTIONS, t_max: float = 100.0):
+    """Times to X% drained from a cubic fit on h/h0 via Newton-Raphson."""
+    c = np.asarray(coeffs, float)  # highest-degree first (np.polyfit)
+    poly = np.poly1d(c)
+    dpoly = np.polyder(poly)
+    out = {}
+    guesses = {10: 2.0, 25: 5.0, 50: 10.0, 75: 20.0, 90: 30.0}
+    for frac in fractions:
+        target = 1.0 - frac / 100.0
+        try:
+            root = newton_raphson(lambda x: float(poly(x)) - target,
+                                  lambda x: float(dpoly(x)), guesses.get(frac, 5.0))
+            if not (0 <= root <= max(t_max * 2, 200)):
+                raise ValueError("root out of range")
+        except Exception:
+            root = None
+            # Brent fallback on a scan.
+            try:
+                from scipy.optimize import brentq
+                ts = np.linspace(0, max(t_max, 1.0), 2000)
+                vals = poly(ts) - target
+                for i in range(len(ts) - 1):
+                    if vals[i] == 0 or vals[i] * vals[i + 1] < 0:
+                        root = float(brentq(lambda x: float(poly(x)) - target, ts[i], ts[i + 1]))
+                        break
+            except Exception:
+                root = None
+        out[f"t{frac}"] = (float(root) if root is not None and np.isfinite(root) else None)
+    return out
+
+
+def solve_generalized_vessel(t_eval, h0, Cd, width_of_h, hole_diameter_m,
+                             g: float = G_SI, rtol: float = 1e-8):
+    """Solve A(h) dh/dt = -Cd*a*sqrt(2 g h), A=pi*(w(h)/2)^2.
+
+    ``width_of_h(h)`` returns vessel width (same length unit as ``h`` and
+    ``hole_diameter_m``). Returns h(t_eval) via solve_ivp (RK45).
+    """
+    from scipy.integrate import solve_ivp
+    a_hole = math.pi * (float(hole_diameter_m) / 2.0) ** 2
+
+    def rhs(tt, yy):
+        h = max(float(yy[0]), 0.0)
+        w = float(width_of_h(h))
+        A = math.pi * (w / 2.0) ** 2 if w > 0 else 0.0
+        if A <= 0 or h <= 0:
+            return [0.0]
+        return [float(-Cd * a_hole * math.sqrt(2.0 * g * h) / A)]
+
+    t_eval = np.asarray(t_eval, float)
+    sol = solve_ivp(rhs, [float(t_eval[0]), float(t_eval[-1])], [float(h0)],
+                    method="RK45", rtol=rtol, atol=1e-10, t_eval=t_eval)
+    return np.maximum(sol.y[0], 0.0)
+
+
+def fit_generalized_vessel(t, h, width_of_h, hole_diameter_m, g: float = G_SI):
+    """Fit (Cd, h0) for the generalized vessel; returns dict."""
+    from scipy.optimize import least_squares
+    t = np.asarray(t, float); h = np.asarray(h, float)
+    hmax = float(np.max(h))
+
+    def resid(p):
+        Cd, h0 = float(p[0]), float(p[1])
+        try:
+            pred = solve_generalized_vessel(t, h0, Cd, width_of_h, hole_diameter_m, g=g)
+        except Exception:
+            return np.full_like(h, 1e3)
+        return pred - h
+
+    res = least_squares(resid, x0=[0.6, hmax], bounds=([0.01, 0.2 * hmax], [2.0, 1.5 * hmax]))
+    Cd, h0 = float(res.x[0]), float(res.x[1])
+    pred = solve_generalized_vessel(t, h0, Cd, width_of_h, hole_diameter_m, g=g)
+    r2, rmse = _r2_rmse(h, pred)
+    return {"Cd": Cd, "h0": h0, "curve_h": pred, "r2": float(r2), "rmse": float(rmse)}
+
+
+def _load_reference_csv(path):
+    """Read the students' CSV: Slice (1-based @fps), Length (cm), Tiempo_s."""
+    import csv as _csv
+    slices, lengths, times = [], [], []
+    with open(path, newline="") as fh:
+        for row in _csv.DictReader(fh):
+            try:
+                slices.append(int(float(row["Slice"])))
+                lengths.append(float(row["Length"]))
+                times.append(float(row["Tiempo_s"]))
+            except Exception:
+                continue
+    return np.asarray(slices), np.asarray(lengths, float), np.asarray(times, float)
+
+
+def validate_against_reference(t_level, h_level, frames_level, calib, reference_csv,
+                               level_fps: float | None = None):
+    """Validation vs manual ImageJ data (spec §3.6).
+
+    Interpolates Physicam's h at the students' frames and reports RMS/max
+    differences in cm (when calibrated) and in h/h0 (always), plus times
+    to X% computed the same way (cubic+Newton) from the 27 manual points.
+    """
+    slices, length_cm, t_ref = _load_reference_csv(reference_csv)
+    if len(slices) == 0:
+        return {"error": "empty reference csv", "n": 0}
+    frames_level = np.asarray(frames_level, float)
+    h_level = np.asarray(h_level, float)
+    order = np.argsort(frames_level)
+    h_at = np.interp(slices - 1, frames_level[order], h_level[order])  # Slice is 1-based
+    # h_level is in metres if calib given else px; convert both ways.
+    if calib is not None and getattr(calib, "method", "none") != "none":
+        h_at_cm = h_at * 100.0 if np.max(np.abs(h_at)) < 5 else h_at  # already m -> cm
+        # h_at is in h_level units: if those are metres, *100; physics passes metres.
+        rms_cm = float(np.sqrt(np.mean((h_at_cm - length_cm) ** 2)))
+        max_cm = float(np.max(np.abs(h_at_cm - length_cm)))
+    else:
+        rms_cm = max_cm = None
+    norm_auto = h_at / h_at[0] if h_at[0] else h_at * 0
+    norm_ref = length_cm / length_cm[0] if length_cm[0] else length_cm * 0
+    rms_norm = float(np.sqrt(np.mean((norm_auto - norm_ref) ** 2)))
+    max_norm = float(np.max(np.abs(norm_auto - norm_ref)))
+    # Times to X% from the students' points: cubic on h/h0 + Newton-Raphson.
+    try:
+        coeffs_ref = np.polyfit(t_ref, norm_ref, 3)
+        times_ref = _times_from_cubic(coeffs_ref, t_max=float(t_ref[-1]) if len(t_ref) else 50.0)
+    except Exception:
+        times_ref = {}
+    return {
+        "n": int(len(slices)), "rms_cm": rms_cm, "max_cm": max_cm,
+        "rms_norm": rms_norm, "max_norm": max_norm, "rms_h_over_h0": rms_norm, "max_h_over_h0": max_norm,
+        "times_ref": times_ref,
+        "points": {"t": [float(v) for v in t_ref], "h_cm": [float(v) for v in length_cm],
+                   "h_norm": [float(v) for v in norm_ref],
+                   "physicam_h_norm": [float(v) for v in norm_auto]},
+        "credit": "manual ImageJ measurements by the FIUBA student team",
+    }
+
+
+def fit_draining_arrays(t, h, calib=None, options: dict | None = None,
+                        width_profile: dict | None = None, hole_y=None,
+                        track_id: str = "level") -> Fit:
+    """Torricelli draining fit on (t, h) arrays.
+
+    ``h`` is in metres when *calib* is calibrated (caller converts), else
+    px. With calibration the fit runs in metres (documented form 2);
+    without it the scale-free normalized form is fitted and Cd needs the
+    container/hole diameters plus a scale for h0 (reported unavailable
+    otherwise). ``options``: hole_diameter_m, container_diameter_m,
+    sigma_d_m (0.0001), sigma_D_m (0.001), reference_csv, g.
+    """
+    options = dict(options or {})
+    calib = calib or Calibration(1.0, 0.0, "none", "")
+    calibrated = calib.method != "none" and calib.m_per_px != 1.0 or calib.method not in ("none",)
+    # Actually: calibrated iff method != none.
+    calibrated = calib.method != "none"
+    g = float(options.get("g", G_SI))
+    t = np.asarray(t, float); h = np.asarray(h, float)
+    ok = np.isfinite(t) & np.isfinite(h)
+    t, h = t[ok], h[ok]
+    order = np.argsort(t); t, h = t[order], h[order]
+    if len(t) < 5:
+        raise ValueError("draining: need >= 5 level points")
+    warnings: list[str] = []
+    # Fit.
+    popt, perr, hfit = _fit_torricelli(t, h)
+    h0, k, t0 = [float(v) for v in popt]
+    eh0, ek, et0 = [float(v) for v in perr]
+    resid = h - hfit
+    factor, chi2_red = _residual_inflation(resid, 3)
+    # curve_fit's covariance is already chi2-inflated (scaled by RSS/dof);
+    # `factor` (RMS vs white-noise sigma) is reported as a diagnostic in
+    # info, and the split-half term below carries the model-mismatch
+    # systematic. Multiplying again would double-count the mismatch.
+    perr_i = np.array([eh0, ek, et0])
+    r2, rmse = _r2_rmse(h, hfit)
+    _structure_warning(resid, t, warnings)
+    if not options.get("_hole_estimated", True):
+        warnings.append("hole level from the Torricelli asymptote (clip ended early); h0/k absorb the offset")
+    # Split-half systematic on k: refit only k on each half with the
+    # global h0/t0 fixed (a free h0/t0 per half is degenerate — the
+    # second half never sees the plateau or the start of draining).
+    sigma_sys_k = 0.0
+    halves_k: list[float] = []
+    mid = 0.5 * (t[0] + t[-1])
+    for mask in (t <= mid, t > mid):
+        if int(mask.sum()) >= 5:
+            try:
+                from scipy.optimize import curve_fit as _cf
+
+                def _hk(tt, k_, _h0=h0, _t0=t0):
+                    return _torricelli_h(tt, _h0, k_, _t0)
+
+                pk, _ = _cf(_hk, t[mask], h[mask], p0=[k], bounds=([1e-12], [np.inf]), maxfev=20000)
+                halves_k.append(float(pk[0]))
+            except Exception:
+                pass
+    if len(halves_k) == 2:
+        sigma_sys_k = abs(halves_k[0] - halves_k[1]) / 2.0
+    ek_total = float(math.hypot(ek, sigma_sys_k))
+
+    d_m = _opt_float(options, "hole_diameter_m", "hole_diameter", "d_m")
+    D_m = _opt_float(options, "container_diameter_m", "container_diameter", "D_m")
+    sigma_d = float(options.get("sigma_d_m", options.get("hole_diameter_stderr_m", 0.0001)))
+    sigma_D = float(options.get("sigma_D_m", options.get("container_diameter_stderr_m", 0.001)))
+
+    unit_h = "m" if calibrated else "px"
+    sqrt_h0 = math.sqrt(max(h0, 0.0))
+    t_f = float(t0 + sqrt_h0 / k) if k > 0 else float("inf")
+    # t_f stderr: propagate h0/k/t0 (ignore covariances, inflated already).
+    et_f = float(math.hypot(et0, (0.5 / (sqrt_h0 * k) * eh0) if sqrt_h0 and k else 0.0,
+                            (sqrt_h0 / (k * k) * ek_total) if k else 0.0)) if np.isfinite(t_f) else 0.0
+
+    Cd_val, Cd_err, Cd_method = None, 0.0, "unavailable_no_scale"
+    t_f_theory = None
+    if d_m and D_m and d_m > 0 and D_m > 0:
+        r_ratio = (float(d_m) / float(D_m)) ** 2  # a/A
+        if calibrated:
+            # Form 2 in metres: Cd = k / (r*sqrt(g/(2(1-r^2))))
+            denom = r_ratio * math.sqrt(g / (2.0 * (1.0 - r_ratio ** 2)))
+            Cd_val = float(k / denom) if denom else None
+            Cd_method = "metres: Cd=k/(r*sqrt(g/(2(1-r^2))))"
+            t_f_theory = torricelli_tf_theory(h0, float(D_m), float(d_m), g)
+        else:
+            # Scale-free form needs h0 in metres for t_f,theory; without a
+            # scale Cd cannot be formed. Documented limitation.
+            warnings.append("Cd needs a length scale (calibration or h0_m/container width); "
+                            "scale-free t_f reported in px-fit units only")
+        if Cd_val is not None and Cd_val == Cd_val:
+            rel_k = (ek_total / k) if k else 0.0
+            rel_r = 2.0 * math.hypot(sigma_d / float(d_m), sigma_D / float(D_m))
+            rel_cal_k = 0.5 * abs(calib.rel_uncertainty) if calibrated else 0.0
+            Cd_err = float(abs(Cd_val) * math.sqrt(rel_k ** 2 + rel_r ** 2 + rel_cal_k ** 2))
+            # Cross-check scale-free Cd = t_f,theory / t_f.
+            if t_f_theory and np.isfinite(t_f) and t_f > 0:
+                Cd_scalefree = float(t_f_theory / (t_f - t0 + (t_f_theory * 0))) if False else float(t_f_theory / (float(t0 + sqrt_h0 / k) - 0.0)) if False else None
+                # t_f includes t0 offset; theory is a duration. Use durations:
+                Cd_sf = float(t_f_theory / (sqrt_h0 / k)) if k else None
+                Cd_method += f"; scale-free check Cd=t_f,theory/t_f_duration={Cd_sf:.4f}" if Cd_sf else ""
+
+    # Analytic times to X% drained (height) from the Torricelli fit.
+    times_torr, times_torr_err = {}, {}
+    dur_tf = (sqrt_h0 / k) if k else float("inf")
+    for frac in DRAIN_FRACTIONS:
+        tx = float(t0 + dur_tf * (1.0 - math.sqrt(1.0 - frac / 100.0))) if np.isfinite(dur_tf) else None
+        times_torr[f"t{frac}"] = tx
+        times_torr_err[f"t{frac}"] = float(abs(tx - t0) * (ek_total / k)) if (tx is not None and k) else 0.0
+
+    # Empirical fits on h/h0 + cubic Newton times.
+    h_norm = h / h0 if h0 else h * 0
+    empirical = _empirical_fits(t, h_norm)
+    times_cubic = {}
+    if empirical.get("cubic", {}).get("coeffs"):
+        times_cubic = _times_from_cubic(empirical["cubic"]["coeffs"], t_max=float(t[-1]))
+
+    # Generalized vessel (when a width profile + hole are available).
+    generalized = None
+    if width_profile and width_profile.get("width_px") is not None and d_m:
+        try:
+            wp_h = np.asarray(width_profile.get("h_px", width_profile.get("h", [])), float)
+            wp_w = np.asarray(width_profile.get("width_px", []), float)
+            good = np.isfinite(wp_h) & np.isfinite(wp_w) & (wp_w > 0)
+            if int(good.sum()) >= 3:
+                # Work in the same units as h: profile h is in px; convert
+                # with calib when the fit is in metres.
+                if calibrated:
+                    wp_h_m = wp_h * float(calib.m_per_px); wp_w_m = wp_w * float(calib.m_per_px)
+                    hh, dd = wp_h_m, float(d_m)
+                else:
+                    wp_h_m, wp_w_m, hh, dd = wp_h, wp_w, wp_h, float(d_m) / float(calib.m_per_px) if calib.m_per_px else float(d_m)
+                    wp_h_m, wp_w_m = wp_h, wp_w
+                order_w = np.argsort(wp_h_m[good])
+                xs, ws = wp_h_m[good][order_w], wp_w_m[good][order_w]
+                # Deduplicate xs for interp.
+                uniq, idx_u = np.unique(xs, return_index=True)
+                ws_u = ws[idx_u]
+
+                def _width_of_h(hv, _xs=uniq, _ws=ws_u):
+                    return float(np.interp(hv, _xs, _ws, left=_ws[0], right=_ws[-1]))
+
+                gen = fit_generalized_vessel(t, h, _width_of_h, float(d_m) if calibrated else float(d_m) / (float(calib.m_per_px) or 1.0) if False else (float(d_m) if calibrated else float(d_m) * 1.0), g=g if calibrated else g)
+                # NOTE: in px units g must be in px/s^2; caller converts.
+                generalized = {"Cd": gen["Cd"], "h0": gen["h0"], "r2": gen["r2"], "rmse": gen["rmse"]}
+        except Exception as exc:
+            generalized = {"error": str(exc)}
+
+    # Ideal (Cd=1) theory curve for the UI (dashed).
+    theory_curve = None
+    if t_f_theory is not None and np.isfinite(t_f_theory):
+        tc_th = np.linspace(float(t[0]), float(t[0] + t_f_theory * 1.05), 100)
+        # Ideal curve starts at t0 with same h0.
+        uth = np.sqrt(max(h0, 0.0)) - (1.0 * (k / Cd_val if Cd_val else k)) * (tc_th - t0) if Cd_val else None
+        if uth is not None:
+            theory_curve = {"t": [float(v) for v in tc_th],
+                            "h": [float(v) for v in np.where(uth > 0, uth ** 2, 0.0)]}
+
+    # Validation vs manual data.
+    validation = None
+    ref_csv = options.get("reference_csv")
+    if ref_csv:
+        try:
+            frames_opt = options.get("_frames")
+            fps_opt = options.get("_fps")
+            if frames_opt is not None:
+                h_for_val = h  # already in fit units (m when calibrated)
+                validation = validate_against_reference(t, h_for_val, np.asarray(frames_opt, float),
+                                                        calib if calibrated else None, str(ref_csv))
+            else:
+                # Fall back to time-based frames at 60 fps convention.
+                fps_guess = float(fps_opt or 60.0)
+                validation = validate_against_reference(
+                    t, h, np.round(t * fps_guess).astype(float), calib if calibrated else None, str(ref_csv))
+        except Exception as exc:
+            validation = {"error": str(exc), "n": 0}
+
+    params: dict = {
+        "Cd": {"value": (float(Cd_val) if Cd_val is not None else None), "stderr": float(Cd_err), "unit": ""},
+        "t_f": {"value": float(t_f), "stderr": float(et_f), "unit": "s"},
+        "k": {"value": float(k), "stderr": float(ek_total), "unit": f"{unit_h}^0.5/s"},
+        "h0": {"value": float(h0), "stderr": float(eh0), "unit": unit_h},
+        "t0": {"value": float(t0), "stderr": float(et0), "unit": "s"},
+    }
+    if t_f_theory is not None:
+        params["t_f_theory"] = {"value": float(t_f_theory), "stderr": 0.0, "unit": "s"}
+    for frac in DRAIN_FRACTIONS:
+        v = times_torr.get(f"t{frac}")
+        params[f"t{frac}"] = {"value": (float(v) if v is not None else None),
+                              "stderr": float(times_torr_err.get(f"t{frac}", 0.0)), "unit": "s"}
+
+    tc = np.linspace(float(t[0]), float(t[-1]), 200)
+    curve = {"t": [float(v) for v in tc], "h": [float(v) for v in _torricelli_h(tc, h0, k, t0)]}
+    # rmse in px for the Fit contract: convert when calibrated.
+    rmse_px = float(rmse / calib.m_per_px) if (calibrated and calib.m_per_px) else float(rmse)
+    info: dict = {
+        "axis": "h", "model_form": Cd_method, "chi2_red": float(chi2_red),
+        "inflation_factor": float(factor), "k_halves": [float(v) for v in halves_k],
+        "sigma_sys_k": float(sigma_sys_k),
+        "empirical": empirical, "times_torricelli": times_torr,
+        "times_cubic_newton": times_cubic, "t_f_theory": (float(t_f_theory) if t_f_theory is not None else None),
+        "generalized_vessel": generalized, "validation": validation,
+        "theory_curve": theory_curve, "hole_y": (float(hole_y) if hole_y is not None else None),
+        "r_ratio_a_over_A": (float((d_m / D_m) ** 2) if (d_m and D_m) else None),
+    }
+    return Fit(model="draining", track_id=track_id, t_range=[float(t[0]), float(t[-1])],
+               params=params, r2=float(r2), rmse_px=rmse_px, n_points=int(len(t)),
+               curve=curve, residuals=[round(float(v), 4) for v in resid],
+               warnings=warnings, info=info)
+
+
+def fit_draining(level, calib=None, t_range=None, options: dict | None = None) -> Fit:
+    """Fit the draining model to a LevelSeries (or Track-like level holder).
+
+    Converts px -> m with *calib* when calibrated, so Cd uses the metres
+    form; the scale-free check Cd = t_f,theory/t_f is recorded in info.
+    The generalized-vessel sub-fit runs in the fit's units (g converted
+    to px/s^2 when uncalibrated).
+    """
+    options = dict(options or {})
+    calib = calib or Calibration(1.0, 0.0, "none", "")
+    # Duck-typing: LevelSeries has t/h_px/surface_y; a Track fallback uses y.
+    if hasattr(level, "h_px"):
+        t_all = np.asarray(level.t, float)
+        h_px_all = np.asarray(level.h_px, float)
+        width_profile = getattr(level, "width_profile", None)
+        hole_y = getattr(level, "hole_y", None)
+        options.setdefault("_hole_estimated", bool(getattr(level, "hole_estimated", True)))
+        options["_frames"] = np.asarray(getattr(level, "frames", np.round(t_all * getattr(level, "fps", 60.0))), float)
+        options["_fps"] = float(getattr(level, "fps", 60.0))
+        track_id = "level"
+    else:
+        # Track fallback: h from surface-like y (max-y minus y).
+        t_all = np.asarray(level.t, float)
+        y = np.asarray(level.y, float)
+        h_px_all = float(np.max(y)) - y if len(y) else y
+        width_profile = options.get("width_profile")
+        hole_y = None
+        track_id = getattr(level, "id", "level")
+    mask = np.ones(len(t_all), dtype=bool)
+    if t_range is not None:
+        mask = (t_all >= t_range[0]) & (t_all <= t_range[1])
+    t, h_px = t_all[mask], h_px_all[mask]
+    if calib.method != "none":
+        h_fit = h_px * float(calib.m_per_px)
+        fit = fit_draining_arrays(t, h_fit, calib, options, width_profile=width_profile,
+                                  hole_y=hole_y, track_id=track_id)
+        # Generalized vessel in metres is already consistent (width profile
+        # converted inside fit_draining_arrays via calib).
+        return fit
+    # Uncalibrated: generalized needs g in px/s^2 — handled by re-running
+    # the generalized sub-fit here with g_px unknown, so skip it in arrays
+    # by not passing a profile that triggers the metres assumption; instead
+    # compute it scale-free below if possible. Simplest: pass profile but
+    # with g converted using container-width scale when available.
+    fit = fit_draining_arrays(t, h_px, calib, options, width_profile=None,
+                              hole_y=hole_y, track_id=track_id)
+    if width_profile and options.get("hole_diameter_m"):
+        try:
+            D_m = _opt_float(options, "container_diameter_m", "container_diameter")
+            # Estimate px scale from container width if we have a median width.
+            med_w = None
+            # width_profile widths are px; a cylinder check uses median width.
+            wp_w = np.asarray(width_profile.get("width_px", []), float)
+            med_w = float(np.median(wp_w[wp_w > 0])) if wp_w.size and np.any(wp_w > 0) else None
+            if D_m and med_w:
+                scale = float(D_m) / med_w  # m/px (refraction caveat noted by caller)
+                g_px = G_SI / scale
+                wp_h = np.asarray(width_profile.get("h_px", []), float)
+                good = np.isfinite(wp_h) & np.isfinite(wp_w) & (wp_w > 0)
+                xs, ws = wp_h[good], wp_w[good]
+                order_w = np.argsort(xs); xs, ws = xs[order_w], ws[order_w]
+                uniq, idx_u = np.unique(xs, return_index=True); ws_u = ws[idx_u]
+
+                def _w(hv, _xs=uniq, _ws=ws_u):
+                    return float(np.interp(hv, _xs, _ws, left=_ws[0], right=_ws[-1]))
+
+                d_px = float(options["hole_diameter_m"]) / scale
+                gen = fit_generalized_vessel(t, h_px, _w, d_px, g=g_px)
+                fit.info["generalized_vessel"] = {"Cd": gen["Cd"], "h0": gen["h0"],
+                                                  "r2": gen["r2"], "rmse": gen["rmse"],
+                                                  "note": "px units with g_px from container-width scale"}
+        except Exception as exc:
+            fit.info["generalized_vessel"] = {"error": str(exc)}
+    return fit
+
+
+# ---------------------------------------------------------------------------
 # dispatcher
 # ---------------------------------------------------------------------------
 
@@ -1031,8 +1545,14 @@ def fit_model(track: Track, model: str, calib: Calibration | None = None,
     and the fit runs in metres with an identity scale.
     """
     key = model.lower().strip()
+    if key == "draining":
+        # Level-based fit: *track* may be a LevelSeries or a Track whose
+        # options carry a level (options.level / options.level_series).
+        opts = dict(options or {})
+        level_obj = opts.pop("level", None) or opts.pop("level_series", None) or track
+        return fit_draining(level_obj, calib, t_range, opts)
     if key not in _DISPATCH:
-        raise ValueError(f"unknown model {model!r}; choose from {sorted(_DISPATCH)}")
+        raise ValueError(f"unknown model {model!r}; choose from {sorted(list(_DISPATCH) + ['draining'])}")
     if calib is not None and getattr(calib, "kind", "constant") == "per_frame":
         metric, identity = _metric_track_and_calib(track, calib)
         fit = _DISPATCH[key](metric, identity, t_range, options)

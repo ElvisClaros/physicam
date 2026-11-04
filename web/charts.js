@@ -106,7 +106,8 @@ export function drawLineChart(canvas, cfg, cursorT) {
         ctx.moveTo(X(ser.x[i]) + 2.2, Y(ser.y[i]));
         ctx.arc(X(ser.x[i]), Y(ser.y[i]), 2.2, 0, Math.PI * 2);
       }
-      ctx.fill();
+      if (ser.hollow) { ctx.strokeStyle = ser.color; ctx.lineWidth = 1.6; ctx.stroke(); }
+      else ctx.fill();
     }
     if (ser.markers) {
       for (const mk of ser.markers) {

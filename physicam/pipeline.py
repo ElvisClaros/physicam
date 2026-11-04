@@ -193,6 +193,7 @@ def run_job(job_dir, video_path, question: str, facts: dict | None = None,
         "id": job_id, "status": "running", "question": question,
         "video": {}, "plan": None, "calibration": None,
         "tracks": [], "fits": [], "answer": None, "strobe_url": None,
+        "level": None, "level_csv_url": None,
         "report_markdown": "", "trace": [],
         "cost": {"sam_frames": 0, "spark_tokens": 0, "usd_estimate": 0.0},
         "error": None,
@@ -335,6 +336,20 @@ def run_job(job_dir, video_path, question: str, facts: dict | None = None,
                     result["fits"].append(fj)
                 _write_result(job_dir, result)
                 safe_emit(ev)
+            elif etype == "level" and ev.get("level"):
+                lj = ev["level"]
+                result["level"] = {
+                    "t": lj.get("t"), "h": lj.get("h"), "surface_y": lj.get("surface_y"),
+                    "bottom_y": lj.get("bottom_y"), "hole_y": lj.get("hole_y"),
+                    "unit": lj.get("unit", "px"), "h_px": lj.get("h_px"),
+                    "frames": lj.get("frames"), "median_width_px": lj.get("median_width_px"),
+                    "width_profile": lj.get("width_profile"),
+                }
+                if lj.get("h_m") is not None:
+                    result["level"]["h_m"] = lj["h_m"]
+                result["level_csv_url"] = f"/api/jobs/{job_id}/level.csv"
+                _write_result(job_dir, result)
+                safe_emit(ev)
             elif etype == "answer":
                 result["answer"] = ev.get("answer")
                 _write_result(job_dir, result)
@@ -366,6 +381,29 @@ def run_job(job_dir, video_path, question: str, facts: dict | None = None,
             safe_emit({"type": "calibration", "calibration": result["calibration"]})
         elif result["calibration"] is None:
             result["calibration"] = Calibration(1.0, 0.0, "none", "").to_dict()
+        # Level series (draining jobs): result.level + CSV download.
+        _level_obj = getattr(agent_result, "level", None)
+        if _level_obj is not None:
+            try:
+                _cal = agent_result.calibration
+                if _cal is not None and _cal.method != "none":
+                    _level_obj.m_per_px = float(_cal.m_per_px)
+                _lj = _level_obj.to_json()
+                # Contract shape: level {t, h, surface_y, bottom_y, unit}
+                result["level"] = {
+                    "t": _lj["t"], "h": _lj["h"], "surface_y": _lj["surface_y"],
+                    "bottom_y": _lj["bottom_y"], "hole_y": _lj.get("hole_y"),
+                    "unit": _lj.get("unit", "px"), "h_px": _lj.get("h_px"),
+                    "frames": _lj.get("frames"), "median_width_px": _lj.get("median_width_px"),
+                    "width_profile": _lj.get("width_profile"),
+                }
+                if _lj.get("h_m") is not None:
+                    result["level"]["h_m"] = _lj["h_m"]
+                result["level_csv_url"] = f"/api/jobs/{job_id}/level.csv"
+                (job_dir / "level.csv").write_text(_level_obj.to_csv())
+                safe_emit({"type": "level", "level": result["level"]})
+            except Exception:
+                pass
         result["trace"] = agent_result.trace or result["trace"]
         result["answer"] = agent_result.answer or result["answer"]
         if result["answer"]:

@@ -17,9 +17,9 @@ KNOWN_SIZES = """Known standard sizes (use only when the object is clearly visib
 - Smartphone: ~0.147 m long (varies; low confidence unless model is identifiable)"""
 
 PHENOMENA = ["free_fall", "projectile", "bounce", "pendulum", "oscillator",
-             "rolling", "constant_velocity", "other"]
+             "rolling", "constant_velocity", "draining", "other"]
 MODELS = ["free_fall", "projectile", "bounce", "pendulum", "oscillator",
-          "constant_velocity", "polynomial"]
+          "constant_velocity", "polynomial", "draining"]
 
 
 @dataclass
@@ -140,7 +140,8 @@ _MEASURE_RE = re.compile(
     r"(?P<value>\d+(?:\.\d+)?|\.\d+)\s*"
     r"(?P<unit>centimetres?|centimeters?|cm|millimetres?|millimeters?|mm|metres?|meters?|m|inches|inch|in|feet|foot|ft)\b",
     re.IGNORECASE)
-_REFERS_CANDIDATES = ["door frame", "string", "cord", "thread", "pendulum", "bob",
+_REFERS_CANDIDATES = ["hole", "orifice", "jar", "container", "tank",
+                      "door frame", "string", "cord", "thread", "pendulum", "bob",
                       "ball", "bottle", "keys", "key", "ruler", "tape measure",
                       "table", "floor", "ramp", "cart", "spring"]
 
@@ -265,6 +266,32 @@ def normalize_facts(facts: dict | None) -> dict:
             out["bob_diameter_m"] = float(bob_diam)
         except (TypeError, ValueError):
             pass
+    # Draining facts (container/hole/h0/hole level + liquid + reference csv).
+    for key in ("container_diameter_m", "hole_diameter_m", "h0_m", "hole_height_m",
+                "hole_diameter_stderr_m", "container_diameter_stderr_m"):
+        v = f.get(key, f.get(key.replace("_m", "")))
+        if v is not None:
+            try:
+                out[key] = float(v)
+            except (TypeError, ValueError):
+                pass
+    # Common aliases.
+    if "container_diameter_m" not in out and f.get("jar_diameter_m") is not None:
+        try:
+            out["container_diameter_m"] = float(f["jar_diameter_m"])
+        except (TypeError, ValueError):
+            pass
+    if f.get("hole_y_px") is not None:
+        try:
+            out["hole_y_px"] = float(f["hole_y_px"])
+        except (TypeError, ValueError):
+            pass
+    if f.get("liquid"):
+        out["liquid"] = str(f["liquid"])
+    if f.get("reference_csv"):
+        out["reference_csv"] = str(f["reference_csv"])
+    if f.get("container_diameter_m") is not None and "diameter_m" not in out:
+        pass  # keep separate from moving-object diameter
     if f.get("length_m_stderr") is not None:
         try:
             out["length_m_stderr"] = float(f["length_m_stderr"])
@@ -365,6 +392,33 @@ def heuristic_plan(question: str, facts: dict | None = None) -> Plan:
     """Offline / fallback plan from the question text alone."""
     q = (question or "").lower()
     nf = normalize_facts(facts)
+    draining_words = ("drain", "torricelli", "liquid level", "water level", "emptying",
+                      "discharge coefficient", "hole", "orifice", "hourglass")
+    if any(w in q for w in draining_words) or nf.get("hole_diameter_m") or nf.get("container_diameter_m"):
+        phen, model = "draining", "draining"
+        if "oil" in q:
+            prompt, candidates = "yellow oil", ["yellow oil", "oil", "liquid"]
+        elif "brown" in q or "dyed" in q or "agua" in q:
+            prompt, candidates = "brown liquid", ["brown liquid", "water", "liquid"]
+        else:
+            prompt, candidates = "brown liquid", ["brown liquid", "water", "liquid"]
+        extracted_d = extract_facts_from_text(question or "")
+        # Map diameter facts referring to hole/container into nf keys.
+        for fact in extracted_d:
+            blob = f"{fact.get('refers_to','')} {fact.get('quote','')}".lower()
+            if fact.get("quantity") == "diameter" and "hole" in blob and "hole_diameter_m" not in nf:
+                nf["hole_diameter_m"] = float(fact["value_m"])
+            if fact.get("quantity") == "diameter" and any(w in blob for w in ("jar", "container", "tank")) and "container_diameter_m" not in nf:
+                nf["container_diameter_m"] = float(fact["value_m"])
+        plan_d = Plan(experiment="Measure liquid draining (Torricelli): discharge coefficient and drain time",
+                      phenomenon=phen, moving_objects=[MovingObject(sam_prompt=prompt, role="liquid",
+                                                                    description="liquid body whose surface level falls",
+                                                                    sam_prompts=candidates[:4])],
+                      spoken_facts=(question if extracted_d else ""),
+                      facts_extracted=extracted_d,
+                      recommended_model=model,
+                      target_quantity={"quantity": "discharge coefficient", "unit": ""})
+        return apply_facts(plan_d, {**nf, **({"facts_extracted": extracted_d} if extracted_d else {})})
     if "pendulum" in q or "period" in q and "swing" in q:
         phen, model = "pendulum", "pendulum"
     elif "restitution" in q or "bounce" in q or "bounc" in q:
@@ -426,6 +480,10 @@ def plan_experiment(client, proxy_video_path, question: str, facts: dict | None 
         "For reference_candidates list roughly static visible objects of standard known size.\n"
         f"{KNOWN_SIZES}\n"
         "recommended_model must be one of: " + ", ".join(MODELS) + ".\n"
+        "If a liquid level falls (emptying jar/tank/bottle, draining, hourglass sand), set phenomenon=\"draining\" "
+        "and recommended_model=\"draining\"; the moving object is the liquid itself with sam_prompt/sam_prompts as "
+        "colour+liquid candidates (\"brown liquid\", \"water\", \"yellow oil\"), and extract hole diameter, container "
+        "diameter and liquid type as facts (diameter facts referring to the hole or the jar/container).\n"
         "time_window_s is [start, end] in proxy-video seconds where the relevant motion happens, or null.\n"
         "If the clip looks like slow motion, set slow_motion and guess the true capture fps."
     )

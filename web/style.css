@@ -195,6 +195,8 @@ table.params{width:100%;border-collapse:collapse;font-size:13.5px}
 table.params th,table.params td{border-bottom:1px solid var(--border-soft);padding:7px 8px;text-align:left}
 table.params th{color:var(--muted);font-size:12px}
 table.params td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+#level-wrap{background:var(--panel);border:1px solid var(--border-soft);border-radius:var(--radius);padding:14px}
+.level-download{color:var(--accent);font-size:13.5px}
 .warn-chip{display:inline-block;background:rgba(245,181,68,.15);color:var(--amber);border:1px solid var(--amber);
   border-radius:999px;padding:2px 9px;font-size:12px;margin:3px 4px 0 0}
 .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}

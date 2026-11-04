@@ -111,6 +111,43 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "job not found")
         return _read_result(job_dir, job_id)
 
+    @app.get("/api/jobs/{job_id}/level.csv")
+    def get_level_csv(job_id: str):
+        job_dir = find_job_dir(job_id)
+        if job_dir is None:
+            raise HTTPException(404, "job not found")
+        path = job_dir / "level.csv"
+        if path.exists():
+            return FileResponse(path, media_type="text/csv",
+                                headers={"Content-Disposition": f'attachment; filename="{job_id}-level.csv"'})
+        result = _read_result(job_dir, job_id)
+        level = result.get("level")
+        if not level:
+            raise HTTPException(404, "no level data for this job")
+        import csv as _csv
+        import io as _io
+        buf = _io.StringIO()
+        w = _csv.writer(buf)
+        w.writerow(["t_s", "h_px", "h_m", "surface_y_px"])
+        ts, hs = level.get("t") or [], level.get("h") or level.get("h_px") or []
+        hms = level.get("h_m") or [None] * len(ts)
+        sys_ = level.get("surface_y") or [None] * len(ts)
+        cal = result.get("calibration") or {}
+        mpp = cal.get("m_per_px") if cal.get("method") not in (None, "none") else None
+        unit = level.get("unit")
+        for i in range(min(len(ts), len(hs))):
+            h = hs[i]
+            if unit == "m":
+                h_px = (h / mpp) if mpp else ""
+                h_m = h
+            else:
+                h_px = h
+                h_m = (h * mpp) if mpp else (hms[i] if i < len(hms) else "")
+            w.writerow([ts[i], h_px, h_m if h_m is not None else "", sys_[i] if i < len(sys_) else ""])
+        from fastapi.responses import Response as _Resp
+        return _Resp(content=buf.getvalue(), media_type="text/csv",
+                     headers={"Content-Disposition": f'attachment; filename="{job_id}-level.csv"'})
+
     @app.get("/api/jobs/{job_id}/events")
     def get_events(job_id: str):
         job_dir = find_job_dir(job_id)

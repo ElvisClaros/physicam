@@ -27,6 +27,11 @@ Rules:
 - SAM prompts must be 1-3 words: colour/material + noun ("metal ball", "red ball", "spring"). Long descriptive prompts fail. Use track_objects with prompts=[...] to try 2-4 short candidates concurrently.
 - Prefer per-frame perspective calibration (calibrate_from_track per_frame) when the apparent size varies.
 - Keep steps efficient: at most a handful of tool calls.
+Draining (Torricelli):
+- Use measure_level(prompt) first for a liquid-level video: it returns h0_px, final h, monotonicity and width stats from SAM masks (h is above the hole, whose level is the final steady surface).
+- Then calibrate: prefer a vertical reference (calibrate_reference on a ruler/paper strip, or an h0_m fact) over the container diameter, because a liquid-filled cylinder refracts horizontally (apparent width ~ outer diameter, vertical distances unmagnified). The container-diameter scale is a cross-check.
+- Then fit_model(track_id=<liquid track or "level">, model="draining", options={"hole_diameter_m": d, "container_diameter_m": D}) returns Cd, t_f, k, h0, t10..t90 plus t_f_theory and empirical fits in info. Scale-free outputs (h/h0, t_f, times to X%) need no calibration.
+- Worked example: jar D=7.5 cm with a 5 mm hole and brown water: measure_level("brown liquid"), calibrate from the container width if no ruler (note the refraction caveat), then fit_model(model="draining", options={"hole_diameter_m": 0.005, "container_diameter_m": 0.075}) and finish with e.g. "C_d = 0.53 ± 0.03 · drains in 46.7 ± 0.4 s".
 Pendulum measuring g:
 - fit_model(model="pendulum", options={"length_m": L}) computes g = 4*pi^2*L/T0^2, where T0 is the measured period T with the finite-amplitude correction, from a circle fit to the bob path plus a damped-sinusoid fit on theta(t). A known length therefore gives g directly, without needing pixel calibration.
 - Spoken or user facts must be passed through to the fit: look in facts, facts_extracted and plan.facts_extracted / plan.spoken_facts for entries like {quantity: "length", value_m: 0.80, refers_to: "string"}. Pass that value_m as options.length_m. If a diameter fact for the bob is also present, also pass options={"bob_diameter_m": <value_m>} so a string length can be corrected to pivot-to-bob-centre.
@@ -57,6 +62,10 @@ TOOLS: list[dict] = [
          "t_start": {"type": ["number", "null"]}, "t_end": {"type": ["number", "null"]},
          "options": {"type": ["object", "null"], "additionalProperties": True}},
          "required": ["track_id", "model"], "additionalProperties": False}},
+    {"type": "function", "name": "measure_level", "description": "Measure liquid level h(t) from SAM masks for a liquid prompt (e.g. \"brown liquid\"). Returns frames, h0_px, final h, monotonicity, width profile stats. h is above the hole (final steady surface). No calibration needed for h/h0.",
+     "parameters": {"type": "object", "properties": {
+         "prompt": {"type": "string"}, "t_start": {"type": ["number", "null"]}, "t_end": {"type": ["number", "null"]}},
+         "required": ["prompt"], "additionalProperties": False}},
     {"type": "function", "name": "inspect_frames", "description": "Send up to 4 extracted frames to Spark vision to disambiguate tracks or read a ruler.",
      "parameters": {"type": "object", "properties": {
          "times_s": {"type": "array", "items": {"type": "number"}}, "question": {"type": "string"}},
@@ -75,7 +84,7 @@ TOOLS: list[dict] = [
 PHEN_TO_MODEL = {"free_fall": "free_fall", "projectile": "projectile", "bounce": "bounce",
                  "pendulum": "pendulum", "oscillator": "oscillator",
                  "constant_velocity": "constant_velocity", "rolling": "constant_velocity",
-                 "other": "projectile"}
+                 "draining": "draining", "other": "projectile"}
 
 
 @dataclass
@@ -86,6 +95,7 @@ class AgentResult:
     calibration: Calibration | None = None
     trace: list = field(default_factory=list)
     used_fallback: bool = False
+    level: object | None = None  # LevelSeries when measure_level ran
 
 
 _SAM_FILLER = {"small", "shiny", "spherical", "round", "swinging", "hanging", "free", "at", "the",
@@ -140,7 +150,7 @@ def make_trace_title(name: str, args: dict, result) -> str:
         model = args.get("model", "")
         if isinstance(result, dict) and result.get("params"):
             params = result["params"]
-            for key in ("T", "g", "speed", "e_0"):
+            for key in ("Cd", "T", "g", "speed", "e_0"):
                 if key in params and isinstance(params[key], dict):
                     p = params[key]
                     unit = p.get("unit", "")
@@ -148,6 +158,11 @@ def make_trace_title(name: str, args: dict, result) -> str:
                             f"{_fmt_num(p.get('stderr', 0))} {unit} (R\u00b2 {_fmt_num(result.get('r2', 0))})").strip()
             return f"Fit {model} (R\u00b2 {_fmt_num(result.get('r2', 0))})"
         return f"Fit {model}"
+    if name == "measure_level":
+        if isinstance(result, dict):
+            return (f"Level \u201c{args.get('prompt', '')}\u201d: {result.get('n_frames', 0)} frames, "
+                    f"h0={_fmt_num(result.get('h0_px'))} px")
+        return "Level measured"
     if name == "inspect_frames":
         text = str((result or {}).get("text", "")) if isinstance(result, dict) else ""
         n = len(args.get("times_s") or [])
@@ -276,6 +291,7 @@ class AgentSession:
         self.width, self.height = int(width), int(height)
         self.emit = emit or (lambda ev: None)
         self.tracks: dict[str, object] = {}
+        self.level = None  # LevelSeries from measure_level
         self._label_cache: dict[str, list] = {}
         self.calibration: Calibration | None = None
         self.fits: list = []
@@ -433,6 +449,47 @@ class AgentSession:
             out["cached"] = True
         return out
 
+    def tool_measure_level(self, prompt: str, t_start=None, t_end=None) -> dict:
+        """Measure liquid level from cached SAM masks (segmenting if needed)."""
+        from physicam.level import level_series
+        from physicam.sam import segment_video
+        clean, _changed = simplify_sam_prompt(str(prompt))
+        # Ensure SAM text is cached (segment_video is a cache hit after pretrack).
+        tracks = segment_video(self.client, self.video_path, clean, self.fps) if self.client is not None else []
+        for tr in tracks:
+            if tr.id not in self.tracks:
+                self.tracks[tr.id] = tr
+                self._emit_track(tr)
+        data_dir = getattr(getattr(self.client, "settings", None), "data_dir", "data") if self.client is not None else "data"
+        hole_y_px = self.facts.get("hole_y_px")
+        hole_h = self.facts.get("hole_height_m")
+        level = level_series(self.video_path, None, self.fps, clean, data_dir=str(data_dir),
+                             hole_y_px=float(hole_y_px) if hole_y_px is not None else None,
+                             hole_height_m=float(hole_h) if hole_h is not None else None)
+        if t_start is not None or t_end is not None:
+            import numpy as _np
+            mask = _np.ones(level.n, dtype=bool)
+            if t_start is not None:
+                mask &= level.t >= float(t_start)
+            if t_end is not None:
+                mask &= level.t <= float(t_end)
+            if int(mask.sum()) >= 5:
+                idx = _np.where(mask)[0]
+                from physicam.level import LevelSeries as _LS
+                level = _LS(t=level.t[idx], h_px=level.h_px[idx], surface_y=level.surface_y[idx],
+                            bottom_y=level.bottom_y, width_profile=level.width_profile,
+                            frames=level.frames[idx], conf=level.conf[idx] if len(level.conf) else level.conf,
+                            fps=level.fps, prompt=level.prompt, hole_y=level.hole_y,
+                            hole_estimated=level.hole_estimated, hole_method=level.hole_method,
+                            median_width_px=level.median_width_px, m_per_px=level.m_per_px,
+                            warnings=list(level.warnings))
+        self.level = level
+        try:
+            self.emit({"type": "level", "level": level.to_json()})
+        except Exception:
+            pass
+        return level.summary()
+
     def tool_calibrate_reference(self, prompt: str, real_size_m: float, dimension: str = "longest") -> dict:
         mid = 0.0
         try:
@@ -472,6 +529,60 @@ class AgentSession:
         return {**cal.to_dict(), "fitted_accel_px_s2": a_px}
 
     def tool_fit_model(self, track_id: str, model: str, t_start=None, t_end=None, options=None) -> dict:
+        if str(model).lower().strip() == "draining":
+            opts = dict(options or {})
+            # Facts fill in diameters/reference when the model omits them.
+            for key in ("hole_diameter_m", "container_diameter_m", "reference_csv",
+                        "hole_diameter_stderr_m", "container_diameter_stderr_m"):
+                if opts.get(key) is None and self.facts.get(key) is not None:
+                    opts[key] = self.facts[key]
+            if self.level is None:
+                prompt = None
+                if track_id in self.tracks:
+                    prompt = self.tracks[track_id].label
+                elif self.plan.moving_objects:
+                    prompt = self.plan.moving_objects[0].sam_prompt
+                if not prompt:
+                    raise ValueError("draining fit needs measure_level first (no liquid prompt)")
+                self.tool_measure_level(prompt)
+            level = self.level
+            # Calibration from facts when none yet: h0_m (vertical, preferred)
+            # then container diameter (refraction caveat).
+            if self.calibration is None or self.calibration.method == "none":
+                try:
+                    if self.facts.get("h0_m") and level is not None and len(level.h_px):
+                        from physicam.level import calibrate_from_h0
+                        self.calibration = calibrate_from_h0(float(level.h_px[0]), float(self.facts["h0_m"]))
+                    elif self.facts.get("container_diameter_m") and level is not None and level.median_width_px:
+                        from physicam.level import calibrate_from_container_diameter
+                        self.calibration = calibrate_from_container_diameter(
+                            float(level.median_width_px), float(self.facts["container_diameter_m"]))
+                except Exception:
+                    pass
+            cal = self.calibration or calib_mod.none()
+            if cal.method != "none" and level is not None:
+                level.m_per_px = float(cal.m_per_px)
+            tr_range = None
+            if t_start is not None or t_end is not None:
+                lo = float(t_start) if t_start is not None else float(level.t[0])
+                hi = float(t_end) if t_end is not None else float(level.t[-1])
+                tr_range = [lo, hi]
+            from physicam.physics import fit_draining
+            fit = fit_draining(level, cal, t_range=tr_range, options=opts)
+            fit.id = f"f{self._fit_counter}"
+            self._fit_counter += 1
+            # Anchor the fit to a real track id when one exists.
+            if track_id in self.tracks:
+                fit.track_id = track_id
+            self.fits.append(fit)
+            self._emit_fit(fit)
+            out = fit.to_dict()
+            out.pop("residuals", None)
+            if out.get("curve"):
+                c = out["curve"]
+                out["curve"] = {k: (v[:: max(1, len(v) // 20)] if isinstance(v, list) and len(v) > 20 else v)
+                                for k, v in c.items()}
+            return out
         tr = self.get_track(track_id)
         cal = self.calibration or calib_mod.none()
         tr_range = None
@@ -545,6 +656,8 @@ class AgentSession:
                                                   args.get("per_frame"))
         if name == "calibrate_from_gravity":
             return self.tool_calibrate_from_gravity(args["track_id"], args.get("t_start"), args.get("t_end"))
+        if name == "measure_level":
+            return self.tool_measure_level(args["prompt"], args.get("t_start"), args.get("t_end"))
         if name == "fit_model":
             return self.tool_fit_model(args["track_id"], args["model"], args.get("t_start"),
                                        args.get("t_end"), args.get("options"))
@@ -695,7 +808,7 @@ def run_agent_loop(session: AgentSession, max_steps: int = 12, timeout_s: float 
         raise RuntimeError("agent ended without finish")
     return AgentResult(answer=session.answer, tracks=list(session.tracks.values()),
                        fits=list(session.fits), calibration=session.calibration,
-                       trace=list(session.trace))
+                       trace=list(session.trace), level=session.level)
 
 
 def _primary_answer(fit, plan: Plan, question: str, calib: Calibration | None) -> dict:
@@ -717,6 +830,25 @@ def _primary_answer(fit, plan: Plan, question: str, calib: Calibration | None) -
                     "summary": f"Coefficient of restitution from {len(valid)} impact(s) "
                                f"(velocity ratio of fitted flight parabolas); pooled g from the same fit. "
                                f"Fit R^2={fit.r2:.3f}, RMSE={fit.rmse_px:.2f}.",
+                    "fit_ids": [fit.id]}
+    if fit is not None and fit.model == "draining":
+        cd = params.get("Cd", {}) if isinstance(params.get("Cd"), dict) else {}
+        tf_p = params.get("t_f", {}) if isinstance(params.get("t_f"), dict) else {}
+        if cd.get("value") is not None:
+            headline = f"C_d = {float(cd['value']):.2f} \u00b1 {float(cd.get('stderr', 0)):.2f}"
+            if tf_p.get("value") is not None:
+                headline += f" \u00b7 drains in {float(tf_p['value']):.1f} \u00b1 {float(tf_p.get('stderr', 0)):.1f} s"
+            return {"headline": headline, "value": round(float(cd["value"]), 4), "unit": "",
+                    "uncertainty": round(float(cd.get("stderr", 0)), 4),
+                    "summary": f"Discharge coefficient from a Torricelli draining fit "
+                               f"(R^2={fit.r2:.4f}, n={fit.n_points}); t_f vs ideal t_f,theory in the fit params. "
+                               f"Calibration: {(calib.method if calib else 'none')}.",
+                    "fit_ids": [fit.id]}
+        if tf_p.get("value") is not None:
+            return {"headline": f"drains in {float(tf_p['value']):.1f} \u00b1 {float(tf_p.get('stderr', 0)):.1f} s",
+                    "value": float(tf_p["value"]), "unit": "s",
+                    "uncertainty": float(tf_p.get("stderr", 0)),
+                    "summary": f"Drain time from a Torricelli fit (R^2={fit.r2:.4f}); Cd needs a length scale.",
                     "fit_ids": [fit.id]}
     # Pick the most relevant scalar param.
     priority = ["g", "period", "T", "speed", "e_0"]
@@ -786,8 +918,31 @@ def run_fallback(session: AgentSession) -> AgentResult:
         calibrated = session.calibration is not None
     model = plan.recommended_model or PHEN_TO_MODEL.get(plan.phenomenon, "projectile")
     if model not in ("free_fall", "projectile", "bounce", "pendulum", "oscillator",
-                     "constant_velocity", "polynomial"):
+                     "constant_velocity", "polynomial", "draining"):
         model = PHEN_TO_MODEL.get(plan.phenomenon, "projectile")
+    if model == "draining":
+        t0 = time.time()
+        lvl_out = session.tool_measure_level(prompt)
+        session._trace(step, "measure_level", {"prompt": prompt}, json.dumps(lvl_out)[:2000],
+                       int((time.time() - t0) * 1000), result=lvl_out)
+        if session.calibration is None:
+            session.calibration = calib_mod.none()
+        t0 = time.time()
+        fit_opts = {k: nf[k] for k in ("hole_diameter_m", "container_diameter_m", "reference_csv") if nf.get(k) is not None}
+        fit_out_d = session.tool_fit_model(track.id, "draining", options=fit_opts or None)
+        session._trace(step, "fit_model", {"track_id": track.id, "model": "draining", "options": fit_opts},
+                       json.dumps(fit_out_d)[:2000], int((time.time() - t0) * 1000), result=fit_out_d)
+        fit_d = session.fits[-1] if session.fits else None
+        answer_d = _primary_answer(fit_d, plan, session.question, session.calibration)
+        session.answer = answer_d
+        session._trace(step, "finish", {}, answer_d["headline"], 0, result=answer_d)
+        try:
+            session.emit({"type": "answer", "answer": answer_d})
+        except Exception:
+            pass
+        return AgentResult(answer=answer_d, tracks=list(session.tracks.values()), fits=list(session.fits),
+                           calibration=session.calibration, trace=list(session.trace),
+                           used_fallback=True, level=session.level)
     # Gravity-as-ruler only when not measuring g and still uncalibrated.
     target_q = str((plan.target_quantity or {}).get("quantity", "")).lower()
     import re as _re
@@ -823,7 +978,8 @@ def run_fallback(session: AgentSession) -> AgentResult:
     except Exception:
         pass
     return AgentResult(answer=answer, tracks=list(session.tracks.values()), fits=list(session.fits),
-                       calibration=session.calibration, trace=list(session.trace), used_fallback=True)
+                       calibration=session.calibration, trace=list(session.trace), used_fallback=True,
+                       level=session.level)
 
 
 def run_agent(client, video_path, plan: Plan, question: str, facts: dict | None,

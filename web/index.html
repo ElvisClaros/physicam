@@ -178,6 +178,24 @@
       </figure>
     </div>
 
+    <div id="level-wrap" hidden>
+      <h2 class="panel-h">Liquid level</h2>
+      <figure class="chart-box">
+        <figcaption>Liquid level vs time</figcaption>
+        <canvas id="chart-level" class="chart"></canvas>
+        <canvas id="chart-level-resid" class="chart chart-resid"></canvas>
+        <div class="chart-tip" hidden></div>
+      </figure>
+      <div id="level-times-wrap" hidden>
+        <h3 class="panel-h">Times to drain</h3>
+        <table class="params" id="level-times-table">
+          <thead><tr><th>Drained</th><th>Physicam</th><th>Reference (manual)</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p><a id="level-download" class="level-download" href="#" download>Download h(t) CSV</a></p>
+    </div>
+
     <article id="report-wrap" class="report" hidden>
       <h2 class="panel-h">Lab report <span class="badge badge-wonder">Muse Wonder</span></h2>
       <figure id="report-strobe" class="report-strobe" hidden>
