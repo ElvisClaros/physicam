@@ -22,6 +22,12 @@ markerless motion-capture instrument: upload a clip, ask *"what is g?"*,
 *"what's the coefficient of restitution?"* or *"what's the period?"* in
 plain language, and get a fitted value with an honest uncertainty.
 
+- **A real lab I know first-hand.** In FIUBA's *Modelación Numérica* course
+  (Universidad de Buenos Aires), we filmed a jar draining through a 5 mm hole
+  and measured the water height **by hand** in ImageJ: 27 frames out of
+  2471. Physicam measures every frame automatically, fits Torricelli's law
+  with a discharge coefficient, and reproduces our manual curve (see
+  Validation).
 - **Science education labs** — free fall, projectile motion, pendulums and
   bounces measured from videos students shoot themselves.
 - **Makers and engineers** — vibration, cycle times and mechanism tuning
@@ -92,6 +98,16 @@ SHA-256 plus request parameters, so demos replay instantly and offline.
   finite-amplitude correction), constant velocity, and generic polynomials.
   All fits run in pixel space with image y pointing down, then convert
   through the calibration.
+- **Liquid level and draining (Torricelli).** SAM 3.1 segments the liquid in
+  every frame. The surface is the first mask row covering at least half of
+  the median width, which makes it robust to the meniscus and the exit jet.
+  h is measured above the **hole** (the level where draining stops), as
+  Torricelli's law requires. The fit is sqrt(h) = sqrt(h0) − k(t − t0),
+  giving the discharge coefficient Cd (with the approach-velocity
+  correction) and the drain time. There is also a generalized-vessel ODE fit
+  with A(h) taken from the mask's width profile (RK45), the course's
+  empirical fits (quadratic, cubic, exponential), times to 10–90 % drained,
+  and an h(t) CSV export.
 - **Uncertainties.** Curve-fit covariance (for restitution, the full
   velocity covariance including the linear coefficient and the
   quadratic/linear cross term) combined in quadrature with the
@@ -117,6 +133,7 @@ Both runs are replayable without new API calls from the disk cache.
 | Bouncing ball, 240 fps: throw 1 (bundled example) | e = 0.70 ± 0.12 (velocity ratio at the one clean impact; the apex-height cross-check gives e_h = 0.83) | No certified value for this ball; lively rubber balls are typically e ≈ 0.7–0.9 | The large error bar is deliberate: residuals are inflated by √χ²ᵣ, and the ball moves toward the camera. g stays in px/s² (no ruler in frame); the powered throw segment is detected and excluded. |
 | Same ball: throw 2 (a different 4 s of the same video, analysed live several times) | e = 0.78 ± 0.09, 0.77 ± 0.06 (independent live runs; the agent picks its own fit window) | Throw 1 above | **Consistent** with throw 1 within the error bars. Two independent throws of the same ball give the same e, and repeated agent runs agree with each other. |
 | Spring pendulum, 30 fps | T = 0.963 ± 0.006 s (damped oscillator; σ includes split-half consistency, T₁ = 0.961 s vs T₂ = 0.967 s) | No certified period for this rig. A period needs no spatial calibration, only the 30 fps time base | The pendulum circle fit was rejected (pivot not above the bob: this is a spring, not a rigid pendulum), so the agent switched to the oscillator model and confirmed it on a sub-window. |
+| **Draining jar, real FIUBA lab** (60 fps, 5 mm hole, 7.5 cm jar) | Level in all 2471 frames. **Cd = 0.56 ± 0.03**, drains in **46.2 ± 0.9 s** (ideal Torricelli with Cd = 1: 25.8 s). Times to 10/25/50/75/90 % drained: 2.37, 6.19, 13.53, 23.10, 31.59 s | Our team's manual ImageJ measurements (27 frames): 2.22, 5.99, 13.22, 22.58, 30.71 s | Curve shape (h/h0): **RMS 2.6 %** of h0 with no scale fitting. Physicam's times run 2–7 % later, a systematic offset that is not yet explained. The absolute h0 comes out 10 % high (6.46 vs 5.86 cm) because calibrating on the jar width is biased by refraction in the curved glass; Physicam flags this, and a vertical ruler fixes it. |
 | Synthetic nonlinear pendulum (tests) | g = 9.836 ± 0.063 m/s² from L = 0.80 m, θ₀ = 25° | 9.81 m/s² | 0.26 % error, within 1σ. Without the finite-amplitude correction the error is 2.1 %. |
 
 Spark's guesses of real object sizes are unreliable (the same ball was
