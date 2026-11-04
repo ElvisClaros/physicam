@@ -107,6 +107,24 @@ def test_pendulum_recovers_period_within_half_pct():
     assert abs(T - T_true) / T_true < 0.005, f"T={T}"
 
 
+def test_oscillator_honest_period_uncertainty():
+    import math
+    rng = np.random.default_rng(3)
+    fps = 60.0
+    T_true = 1.6
+    omega = 2 * np.pi / T_true
+    t = np.arange(0, 720) / fps
+    x = 500 + 200 * np.exp(-0.02 * t) * np.cos(omega * t)
+    y = np.full_like(t, 400.0)
+    track = make_track(t, add_noise(x, rng=rng), y, fps)
+    fit = fit_model(track, "oscillator", Calibration(0.001, 0.0, "reference", ""))
+    assert fit.info["T_halves"] is not None and len(fit.info["T_halves"]) == 2
+    assert fit.info["sigma_sys"] == abs(fit.info["T_halves"][0] - fit.info["T_halves"][1]) / 2
+    expected = math.hypot(fit.info["sigma_stat"], fit.info["sigma_sys"])
+    assert abs(fit.params["T"]["stderr"] - expected) < 1e-12
+    assert abs(fit.params["T"]["value"] - T_true) < 2 * fit.params["T"]["stderr"]
+
+
 def test_constant_velocity():
     rng = np.random.default_rng(13)
     fps = 60.0

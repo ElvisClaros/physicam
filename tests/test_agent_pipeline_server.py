@@ -222,6 +222,17 @@ def test_pipeline_writes_contract_result(tmp_path):
     assert '"done"' in (job_dir / "events.jsonl").read_text()
 
 
+def test_cost_original_registry_roundtrip(tmp_path):
+    from physicam.pipeline import _cost_key, _is_live_cost, _load_cost_registry, _save_cost_registry
+
+    key = _cost_key("deadbeef", "What is g?", {})
+    original = {"sam_frames": 960, "spark_tokens": 12345, "usd_estimate": 0.21}
+    _save_cost_registry(tmp_path, {key: original})
+    assert _load_cost_registry(tmp_path)[key] == original
+    assert _is_live_cost(original)
+    assert not _is_live_cost({"sam_frames": 0, "spark_tokens": 0, "usd_estimate": 0.0})
+
+
 # -- server --------------------------------------------------------------------
 
 def _seed_finished_job(tmp_path, monkeypatch):

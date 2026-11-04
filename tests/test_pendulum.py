@@ -81,6 +81,26 @@ def test_pendulum_calibration_circle_recovers_length():
     assert abs(fit.params["g"]["value"] - G_TRUE) / G_TRUE < 0.02
 
 
+def test_pendulum_honest_uncertainty_covers_g():
+    import math
+
+    t, x, y = _simulate(theta0_deg=25.0)
+    fit = fit_model(_track(t, x, y), "pendulum", Calibration(1.0, 0.0, "none", ""),
+                    options={"length_m": L_TRUE})
+    g = fit.params["g"]
+    assert abs(g["value"] - G_TRUE) < 2 * g["stderr"], (
+        f"g={g['value']}±{g['stderr']} does not cover {G_TRUE}")
+    # Half-split systematic is reported and combined in quadrature.
+    assert fit.info["T_halves"] is not None and len(fit.info["T_halves"]) == 2
+    assert fit.info["sigma_sys"] == abs(fit.info["T_halves"][0] - fit.info["T_halves"][1]) / 2
+    assert fit.info["sigma_stat"] > 0
+    expected = math.hypot(fit.info["sigma_stat"], fit.info["sigma_sys"])
+    assert abs(fit.params["T"]["stderr"] - expected) < 1e-12
+    # g must use the honest period error (not the covariance-only value):
+    # with a known length, period contributes 2*sigma_T/T to g.
+    assert g["stderr"] > 0
+
+
 def test_pendulum_short_arc_warns_and_no_bogus_length():
     t, x, y = _simulate(theta0_deg=4.0, seed=11)
     calib = Calibration(M_PER_PX, 0.002, "reference", "synthetic")

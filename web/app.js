@@ -281,6 +281,28 @@ function renderReportStrobe() {
   if (has) $("report-strobe-img").src = state.strobeUrl;
 }
 
+function openLightbox(src) {
+  if (!src) return;
+  const box = $("lightbox");
+  $("lightbox-img").src = src;
+  box.hidden = false;
+}
+function closeLightbox() { $("lightbox").hidden = true; }
+function initLightbox() {
+  const img = $("report-strobe-img");
+  if (img && !img.dataset.lightboxWired) {
+    img.dataset.lightboxWired = "1";
+    img.addEventListener("click", () => openLightbox(state.strobeUrl || img.src));
+  }
+  const box = $("lightbox");
+  if (box && !box.dataset.lightboxWired) {
+    box.dataset.lightboxWired = "1";
+    box.addEventListener("click", (e) => { if (e.target !== $("lightbox-img")) closeLightbox(); });
+    $("lightbox-close")?.addEventListener("click", closeLightbox);
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !box.hidden) closeLightbox(); });
+  }
+}
+
 /* ---------------- results rendering ---------------- */
 
 function isDimensionless(unit) {
@@ -298,6 +320,52 @@ function eHeightCrossCheck() {
     if (typeof raw === "object" && isFinite(raw.value)) return { value: raw.value, stderr: raw.stderr ?? null };
   }
   return null;
+}
+
+/** One-line provenance from the primary fit's info + plan facts. */
+function answerProvenance(answer) {
+  const fits = state.fits || [];
+  if (!fits.length) return "";
+  const primary = fits.find((f) => f.id === (answer?.fit_ids || [])[0]) || fits[0];
+  if (!primary) return "";
+  const info = primary.info || {};
+  const model = primary.model || "fit";
+  const domain = info.theta_fit ? "θ(t)" : (info.axis ? `${info.axis}(t)` : (primary.curve?.axis ? `${primary.curve.axis}(t)` : ""));
+  const parts = [domain ? `${model} fit on ${domain}` : `${model} fit`];
+  const T = primary.params?.T?.value ?? primary.params?.period?.value;
+  const tr = primary.t_range || [];
+  if (T && isFinite(T) && T > 0 && tr.length === 2 && isFinite(tr[1] - tr[0])) {
+    const n = Math.round((tr[1] - tr[0]) / T);
+    if (n >= 1) parts.push(`${n} period${n === 1 ? "" : "s"}`);
+  } else if ((primary.impacts || []).length) {
+    const n = primary.impacts.length;
+    parts.push(`${n} impact${n === 1 ? "" : "s"}`);
+  }
+  // Length / calibration provenance.
+  const plan = state.result?.plan || {};
+  const facts = plan.facts_extracted || [];
+  const lengthFact = facts.find((f) => f && (f.quantity === "length" || f.quantity === "distance"));
+  const Lm = info.L_m ?? primary.params?.L_m?.value ?? lengthFact?.value_m;
+  const fmtLen = (m) => {
+    if (m == null || !isFinite(m)) return "";
+    const cm = m * 100;
+    return Math.abs(cm - Math.round(cm)) < 0.05 ? `${Math.round(cm)} cm` : `${Number(m).toPrecision(3)} m`;
+  };
+  const src = String(info.length_source || "");
+  if (Lm != null && isFinite(Lm)) {
+    if (src.includes("string") || lengthFact) {
+      const spoken = plan.spoken_facts || lengthFact?.quote || lengthFact?.refers_to;
+      parts.push(spoken ? `length from narration (${fmtLen(Lm)})` : `length from string (${fmtLen(Lm)})`);
+    } else if (src.includes("calibration") || info.method_g === "calibration") {
+      parts.push(`length from calibration (${fmtLen(Lm)})`);
+    } else {
+      parts.push(`length ${fmtLen(Lm)}`);
+    }
+  } else if (state.result?.calibration && state.result.calibration.method && state.result.calibration.method !== "none") {
+    const cal = state.result.calibration;
+    parts.push(`calibration: ${cal.method}${cal.details ? ` (${cal.details})` : ""}`);
+  }
+  return parts.filter(Boolean).join(" · ");
 }
 
 function renderAnswer(answer, animate = true) {
@@ -318,6 +386,8 @@ function renderAnswer(answer, animate = true) {
     if (showValue) countUp(value, answer);
   }
   $("answer-headline").textContent = showValue ? (answer.headline || "") : "";
+  const provEl = $("answer-provenance");
+  if (provEl) provEl.textContent = answerProvenance(answer);
   $("answer-summary").textContent = answer.summary || "";
   const delta = $("answer-delta");
   const unit = String(answer.unit || "").trim().replace("²", "^2");
@@ -402,6 +472,16 @@ function renderCost(cost) {
   if (!cost) return;
   const el = $("cost-line");
   el.hidden = false;
+  const original = cost.original && typeof cost.original === "object" ? cost.original : null;
+  const isCachedReplay = Boolean(original) &&
+    !(Number(cost.sam_frames) > 0) && !(Number(cost.spark_tokens) > 0);
+  if (isCachedReplay) {
+    const origUsd = original.usd_estimate != null && isFinite(Number(original.usd_estimate))
+      ? `≈ $${Number(original.usd_estimate).toFixed(2)}` : "";
+    el.textContent = [origUsd ? `${origUsd} (original live run)` : "(original live run)",
+      "cached replay"].join(" · ");
+    return;
+  }
   const frames = cost.sam_frames != null ? `${cost.sam_frames} SAM frames` : "";
   const tokens = cost.spark_tokens != null
     ? `${cost.spark_tokens >= 1000 ? (cost.spark_tokens / 1000).toFixed(1).replace(/\.0$/, "") + "k" : cost.spark_tokens} Spark tokens` : "";
@@ -808,6 +888,8 @@ function resetJob() {
   state.stageMode = "video";
   $("timeline").innerHTML = "";
   $("answer-card").hidden = true;
+  if ($("answer-provenance")) $("answer-provenance").textContent = "";
+  if ($("lightbox")) $("lightbox").hidden = true;
   $("fits-wrap").hidden = true;
   $("charts-wrap").hidden = true;
   $("report-wrap").hidden = true;
@@ -1276,6 +1358,7 @@ async function init() {
   });
   initInput();
   initTransport();
+  initLightbox();
   startSync();
   if (!MOCK) {
     try {

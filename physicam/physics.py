@@ -101,6 +101,48 @@ def _r2_rmse(y, yfit):
     return r2, math.sqrt(ss_res / max(len(y), 1))
 
 
+def _residual_inflation(resid, n_params: int) -> tuple[float, float]:
+    """Inflation factor for covariance stderrs from structured residuals.
+
+    The point-to-point (high-frequency) scatter of the residuals estimates
+    the white centroid noise; the residual RMS is the total noise including
+    low-frequency model mismatch.  ``chi2_red = RSS / (dof * sigma_hf**2)``
+    is therefore ~1 for a clean white-noise fit and > 1 when residuals are
+    structured (model mismatch, drag, perspective).  Returns
+    ``(sqrt(max(chi2_red, 1)), chi2_red)``.  Covariance stderrs from
+    ``curve_fit``/``polyfit(cov=True)`` already absorb the RMS, so this
+    factor only adds the *excess* over white noise.
+    """
+    r = np.asarray(resid, dtype=float)
+    r = r[np.isfinite(r)]
+    n = len(r)
+    if n < 8:
+        return 1.0, 1.0
+    dof = max(n - int(n_params), 1)
+    rss = float(np.sum(r ** 2))
+    if rss <= 0:
+        return 1.0, 1.0
+    d = np.diff(r)
+    med = float(np.median(d))
+    sigma_hf = 1.4826 * float(np.median(np.abs(d - med))) / math.sqrt(2.0)
+    if sigma_hf <= 0:
+        sigma_hf = float(np.std(d) / math.sqrt(2.0)) if len(d) else 0.0
+    if sigma_hf <= 0:
+        return 1.0, 1.0
+    chi2_red = rss / (dof * sigma_hf ** 2)
+    if not np.isfinite(chi2_red) or chi2_red <= 1.0:
+        return 1.0, float(chi2_red) if np.isfinite(chi2_red) else 1.0
+    return float(math.sqrt(chi2_red)), float(chi2_red)
+
+
+def _inflate_errs(errs, resid, n_params: int):
+    """Scale *errs* by the residual inflation factor; return (errs, factor, chi2_red)."""
+    factor, chi2_red = _residual_inflation(resid, n_params)
+    if factor != 1.0:
+        errs = np.asarray(errs, dtype=float) * factor
+    return errs, factor, chi2_red
+
+
 def _param(value_px, stderr_px, unit_px, calib: Calibration, unit_m, scale_pow=1):
     """Convert px param to calibrated unit combining covariance + calibration uncertainty."""
     if calib is None or calib.method == "none":
@@ -163,6 +205,10 @@ def fit_projectile(track: Track, calib: Calibration | None = None, t_range=None,
         cy, ey = lin_err(t[keepy], y[keepy], 2)
     except Exception:
         ex, ey = np.zeros(2), np.zeros(3)
+    # Honest errors: inflate covariance stderrs by sqrt(chi2_red) when
+    # residuals are structured (chi2_red from residual RMS vs white noise).
+    ex, _fx, _cx2 = _inflate_errs(ex, x[keepx] - np.polyval(cx, t[keepx]), 2)
+    ey, _fy, _cy2 = _inflate_errs(ey, y[keepy] - np.polyval(cy, t[keepy]), 3)
     yfit = np.polyval(cy, t)
     xfit = np.polyval(cx, t)
     r2, rmse = _r2_rmse(y, yfit)
@@ -193,7 +239,8 @@ def fit_projectile(track: Track, calib: Calibration | None = None, t_range=None,
                params=params, r2=r2, rmse_px=rmse, n_points=int(len(t)),
                curve={"t": [float(v) for v in tc], "x": [float(v) for v in np.polyval(cx, tc)],
                       "y": [float(v) for v in np.polyval(cy, tc)]},
-               residuals=[round(float(v), 4) for v in resid], warnings=warnings)
+               residuals=[round(float(v), 4) for v in resid], warnings=warnings,
+               info={"chi2_red": float(_cy2), "inflation_factor": float(_fy)})
 
 
 def fit_free_fall(track, calib=None, t_range=None, options=None) -> Fit:
@@ -222,6 +269,8 @@ def fit_constant_velocity(track, calib=None, t_range=None, options=None) -> Fit:
         except Exception:
             return np.zeros(deg + 1)
     exv, eyv = errs(t, x, 1), errs(t, y, 1)
+    exv, _fxv, _cxv = _inflate_errs(exv, x - np.polyval(cx, t), 2)
+    eyv, _fyv, _cyv = _inflate_errs(eyv, y - np.polyval(cy, t), 2)
     vx, vy = float(cx[0]), float(cy[0])
     speed = math.hypot(vx, vy)
     serr = math.hypot(float(exv[0]), float(eyv[0]))
@@ -238,7 +287,8 @@ def fit_constant_velocity(track, calib=None, t_range=None, options=None) -> Fit:
                params=params, r2=r2, rmse_px=rmse, n_points=int(len(t)),
                curve={"t": [float(v) for v in tc], "x": [float(v) for v in np.polyval(cx, tc)],
                       "y": [float(v) for v in np.polyval(cy, tc)]},
-               residuals=[round(float(v), 4) for v in (y - yfit)], warnings=warnings)
+               residuals=[round(float(v), 4) for v in (y - yfit)], warnings=warnings,
+               info={"chi2_red": float(_cyv), "inflation_factor": float(_fyv)})
 
 
 def fit_polynomial(track, calib=None, t_range=None, options=None) -> Fit:
@@ -254,6 +304,7 @@ def fit_polynomial(track, calib=None, t_range=None, options=None) -> Fit:
         errs = np.sqrt(np.diag(cov))
     except Exception:
         errs = np.zeros(deg + 1)
+    errs, _fpoly, _cpoly = _inflate_errs(errs, yy[keep] - np.polyval(coeffs, t[keep]), deg + 1)
     yfit = np.polyval(coeffs, t)
     r2, rmse = _r2_rmse(yy, yfit)
     params = {f"c{i}": {"value": float(coeffs[deg - i]), "stderr": float(errs[deg - i]) if len(errs) > deg - i else 0.0,
@@ -265,7 +316,7 @@ def fit_polynomial(track, calib=None, t_range=None, options=None) -> Fit:
     return Fit(model="polynomial", track_id=track.id, t_range=[float(t[0]), float(t[-1])],
                params=params, r2=r2, rmse_px=rmse, n_points=int(len(t)), curve=curve,
                residuals=[round(float(v), 4) for v in (yy - yfit)], warnings=[],
-               info={"axis": axis})
+               info={"axis": axis, "chi2_red": float(_cpoly), "inflation_factor": float(_fpoly)})
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +344,54 @@ def _fit_damped_sinusoid(t: np.ndarray, s: np.ndarray):
     p0 = [float(np.std(s) * math.sqrt(2)) or 1.0, 0.05, 2 * math.pi * f0, 0.0, float(np.mean(s))]
     popt, perr, _keep, sfit = _curve_fit_robust(_damped_model, t - t[0], s, p0)
     return popt, perr, sfit
+
+
+def _half_split_periods(t: np.ndarray, s: np.ndarray, T_full: float) -> list[float] | None:
+    """Periods from fitting each half separately, or None.
+
+    Only when each half spans >= 3 periods (duration / T_full >= 3).
+    """
+    if not (np.isfinite(T_full) and T_full > 0) or len(t) < 12:
+        return None
+    mid = 0.5 * (float(t[0]) + float(t[-1]))
+    halves: list[float] = []
+    for mask in (t <= mid, t > mid):
+        if int(mask.sum()) < 6:
+            return None
+        th, sh = t[mask], s[mask]
+        if float(th[-1] - th[0]) / T_full < 3.0:
+            return None
+        try:
+            popt_h, _perr_h, _fit_h = _fit_damped_sinusoid(th, sh)
+        except Exception:
+            return None
+        omega_h = float(popt_h[2])
+        if not (np.isfinite(omega_h) and omega_h > 0):
+            return None
+        halves.append(float(2 * math.pi / omega_h))
+    return halves
+
+
+def _honest_period(t: np.ndarray, s: np.ndarray, resid, omega: float, eomega_cov: float,
+                   n_params: int = 5) -> dict:
+    """Honest period uncertainty: inflated stat + half-split systematic.
+
+    Returns dict with T, sigma_stat (covariance stderr inflated by
+    sqrt(chi2_red) when chi2_red > 1), sigma_sys (|T1-T2|/2 from halves,
+    0 when halves unavailable), sigma_T = sqrt(sigma_stat^2+sigma_sys^2),
+    T_halves, chi2_red and inflation_factor.
+    """
+    T = float(2 * math.pi / omega) if omega else float("inf")
+    eT_cov = float(T * (eomega_cov / omega)) if omega else 0.0
+    factor, chi2_red = _residual_inflation(resid, n_params)
+    sigma_stat = float(eT_cov * factor)
+    halves = _half_split_periods(np.asarray(t, float), np.asarray(s, float), T)
+    sigma_sys = float(abs(halves[0] - halves[1]) / 2.0) if halves else 0.0
+    sigma_T = float(math.hypot(sigma_stat, sigma_sys))
+    return {"T": T, "eT_cov": float(eT_cov), "sigma_stat": sigma_stat,
+            "sigma_sys": sigma_sys, "sigma_T": sigma_T,
+            "T_halves": [float(v) for v in halves] if halves else None,
+            "chi2_red": float(chi2_red), "inflation_factor": float(factor)}
 
 
 def _fit_circle(x: np.ndarray, y: np.ndarray) -> dict:
@@ -366,17 +465,24 @@ def _fit_damped(track, calib, t_range, model_name, options=None) -> Fit:
     A, gamma, omega, phi, c = [float(v) for v in popt]
     eA, egamma, eomega, ephi, ec = [float(v) for v in perr]
     T = 2 * math.pi / omega if omega else float("inf")
-    eT = T * (eomega / omega) if omega else 0.0
     r2, rmse = _r2_rmse(s, sfit)
     resid = s - sfit
     _structure_warning(resid, t, warnings)
+    honest = _honest_period(t, np.asarray(s, float), resid, omega, eomega)
+    eT = float(honest["sigma_T"])
+    # Scale omega-family stderrs by the same honest factor as T.
+    scale = (eT / honest["eT_cov"]) if honest["eT_cov"] > 0 else 1.0
+    eomega = float(eomega * scale)
+    eA, egamma = float(eA * honest["inflation_factor"]), float(egamma * honest["inflation_factor"])
     params = {
         "T": {"value": float(T), "stderr": float(eT), "unit": "s"},
         "omega": {"value": float(omega), "stderr": float(eomega), "unit": "rad/s"},
         "gamma": {"value": float(gamma), "stderr": float(egamma), "unit": "1/s"},
         "amplitude": _param(A, eA, "px", calib, "m", 1),
     }
-    info = {"axis": axis_name}
+    info = {"axis": axis_name, "T_halves": honest["T_halves"],
+            "sigma_stat": float(honest["sigma_stat"]), "sigma_sys": float(honest["sigma_sys"]),
+            "chi2_red": float(honest["chi2_red"]), "inflation_factor": float(honest["inflation_factor"])}
     omega0_fit = math.sqrt(max(omega ** 2 + gamma ** 2, 0.0))
     zeta = gamma / omega0_fit if omega0_fit else 0.0
     params["omega0"] = {"value": float(omega0_fit), "stderr": float(eomega), "unit": "rad/s"}
@@ -442,6 +548,8 @@ def fit_pendulum(track, calib=None, t_range=None, options=None) -> Fit:
     resid_list: list[float] = []
     curve: dict = {}
     used_theta = False
+    honest_signal: np.ndarray | None = None
+    honest_resid: np.ndarray | None = None
     extent = max(float(np.ptp(x)), float(np.ptp(y)), 1.0)
     theta_popt = None
     if circle is not None and 0 < circle["R"] <= 50.0 * extent + 1000.0:
@@ -469,6 +577,8 @@ def fit_pendulum(track, calib=None, t_range=None, options=None) -> Fit:
                          "y": [float(v) for v in (cy_c + r_c * np.cos(theta_curve))],
                          "axis": axis_name}
                 _structure_warning(theta - theta_fit, t, warnings)
+                honest_signal = np.asarray(theta, dtype=float)
+                honest_resid = np.asarray(theta - theta_fit, dtype=float)
         except Exception:
             theta_popt = None
     if not used_theta:
@@ -482,6 +592,8 @@ def fit_pendulum(track, calib=None, t_range=None, options=None) -> Fit:
         r2, rmse_px = _r2_rmse(s, sfit)
         resid_list = [round(float(v), 4) for v in (s - sfit)]
         _structure_warning(s - sfit, t, warnings)
+        honest_signal = np.asarray(s, dtype=float)
+        honest_resid = np.asarray(s - sfit, dtype=float)
         if L_px:
             ratio = min(abs(A) / L_px, 1.0)
             theta0_rad = float(math.asin(ratio))
@@ -499,7 +611,18 @@ def fit_pendulum(track, calib=None, t_range=None, options=None) -> Fit:
                  other: _smoothed_other_axis(track, tc, other), "axis": axis_name}
 
     T = 2 * math.pi / omega if omega else float("inf")
-    eT = float(T * (eomega / omega)) if omega else 0.0
+    # Honest period uncertainty: inflated stat + half-split systematic.
+    if honest_signal is not None and honest_resid is not None and omega:
+        honest = _honest_period(t, honest_signal, honest_resid, omega, eomega)
+    else:
+        honest = {"sigma_stat": float(T * (eomega / omega)) if omega else 0.0,
+                  "sigma_sys": 0.0, "sigma_T": float(T * (eomega / omega)) if omega else 0.0,
+                  "T_halves": None, "chi2_red": 1.0, "inflation_factor": 1.0, "eT_cov": float(T * (eomega / omega)) if omega else 0.0}
+    eT = float(honest["sigma_T"])
+    _scale = (eT / honest["eT_cov"]) if honest.get("eT_cov") else 1.0
+    eomega = float(eomega * _scale)
+    egamma = float(egamma * float(honest["inflation_factor"]))
+    theta0_err = float(theta0_err * float(honest["inflation_factor"]))
     # Finite-amplitude correction.
     corr = 1.0 + theta0_rad ** 2 / 16.0 + 11.0 * theta0_rad ** 4 / 3072.0
     dcorr = theta0_rad / 8.0 + 11.0 * theta0_rad ** 3 / 768.0
@@ -593,6 +716,11 @@ def fit_pendulum(track, calib=None, t_range=None, options=None) -> Fit:
         "finite_amplitude_correction": float(corr),
         "theta_fit": bool(used_theta),
         "length_source": length_source,
+        "T_halves": honest["T_halves"],
+        "sigma_stat": float(honest["sigma_stat"]),
+        "sigma_sys": float(honest["sigma_sys"]),
+        "chi2_red": float(honest["chi2_red"]),
+        "inflation_factor": float(honest["inflation_factor"]),
     }
     if bob_d is not None and length_m is not None and (is_string or bob_explicit):
         info["bob_diameter_m"] = float(bob_d)
@@ -717,6 +845,11 @@ def fit_bounce(track: Track, calib: Calibration | None = None, t_range=None,
         except Exception:
             cov = np.zeros((3, 3))
             errs = np.zeros(3)
+        # Honest segment errors: inflate by sqrt(chi2_red) on structured residuals.
+        _seg_factor, _seg_chi2 = _residual_inflation(yy[keep] - np.polyval(coeffs, tt[keep]), 3)
+        if _seg_factor != 1.0:
+            errs = np.asarray(errs, dtype=float) * _seg_factor
+            cov = np.asarray(cov, dtype=float) * (_seg_factor ** 2)
         a_px = float(2.0 * coeffs[0])
         a_err = float(2.0 * errs[0]) if len(errs) > 0 else 0.0
         yfit = np.polyval(coeffs, tt)
@@ -726,7 +859,8 @@ def fit_bounce(track: Track, calib: Calibration | None = None, t_range=None,
         seg.update({"g_px": a_px, "g_px_stderr": a_err, "coeffs": [float(c) for c in coeffs],
                     "coeff_stderr": [float(e) for e in errs],
                     "coeff_cov": [[float(v) for v in row] for row in np.asarray(cov, dtype=float).reshape(3, 3)],
-                    "r2": r2s, "rmse_px": rmses,
+                    "r2": r2s, "rmse_px": rmses, "chi2_red": float(_seg_chi2),
+                    "inflation_factor": float(_seg_factor),
                     "t_fit_range": [float(tt[0]), float(tt[-1])]})
         # Quality gate: a flight that is not cleanly parabolic (caught ball,
         # rolling tail, perspective-distorted throw) must not poison the pool.

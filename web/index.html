@@ -143,6 +143,7 @@
       <div class="answer-main">
         <div id="answer-value" class="answer-value"></div>
         <div id="answer-headline" class="answer-headline"></div>
+        <div id="answer-provenance" class="answer-provenance"></div>
         <div id="answer-delta" class="answer-delta"></div>
       </div>
       <p id="answer-summary" class="answer-summary"></p>
@@ -180,13 +181,17 @@
     <article id="report-wrap" class="report" hidden>
       <h2 class="panel-h">Lab report <span class="badge badge-wonder">Muse Wonder</span></h2>
       <figure id="report-strobe" class="report-strobe" hidden>
-        <img id="report-strobe-img" alt="Strobe view">
-        <figcaption>Strobe view</figcaption>
+        <img id="report-strobe-img" alt="Stroboscopic composite from SAM 3.1 masks" title="Click to view full size">
+        <figcaption>Stroboscopic composite from SAM 3.1 masks · every k-th frame</figcaption>
       </figure>
       <div id="report" class="report-body"></div>
     </article>
 
     <footer id="cost-line" class="cost-line" hidden></footer>
+    <div id="lightbox" class="lightbox" hidden role="dialog" aria-modal="true" aria-label="Strobe image full size">
+      <button id="lightbox-close" type="button" class="lightbox-close" aria-label="Close">×</button>
+      <img id="lightbox-img" alt="Stroboscopic composite from SAM 3.1 masks — full size">
+    </div>
   </section>
 </main>
 <script type="module" src="app.js"></script>

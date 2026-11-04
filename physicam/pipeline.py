@@ -12,6 +12,47 @@ from physicam.plan import Plan, apply_facts, heuristic_plan, normalize_facts, pl
 PALETTE = ["#ff4d4f", "#4da3ff", "#ffd24d", "#52e0a0", "#c792ff", "#ff9f43"]
 
 
+def _cost_registry_path(data_dir) -> Path:
+    return Path(data_dir) / "cache" / "cost_original.json"
+
+
+def _cost_key(video_sha: str, question: str, facts) -> str:
+    import hashlib
+
+    src = f"{video_sha}|{question}|{json.dumps(facts or {}, sort_keys=True, default=str)}"
+    return hashlib.sha256(src.encode()).hexdigest()
+
+
+def _load_cost_registry(data_dir) -> dict:
+    try:
+        p = _cost_registry_path(data_dir)
+        if p.exists():
+            data = json.loads(p.read_text())
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_cost_registry(data_dir, registry: dict) -> None:
+    try:
+        p = _cost_registry_path(data_dir)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(registry, indent=1))
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
+def _is_live_cost(cost: dict) -> bool:
+    try:
+        return bool((cost.get("sam_frames") or 0) or (cost.get("spark_tokens") or 0)
+                    or (cost.get("total_tokens") or 0) or (cost.get("usd_estimate") or 0))
+    except Exception:
+        return False
+
+
 def _write_result(job_dir: Path, result: dict) -> None:
     job_dir.mkdir(parents=True, exist_ok=True)
     tmp = job_dir / "result.json.tmp"
@@ -157,6 +198,35 @@ def run_job(job_dir, video_path, question: str, facts: dict | None = None,
     def stage(name: str) -> None:
         safe_emit({"type": "stage", "stage": name})
         _write_result(job_dir, result)
+
+    # Original live cost for this video+question (cached replays carry it over).
+    _cost_data_dir = getattr(getattr(client, "settings", None), "data_dir", "data") if client is not None else "data"
+    _cost_key_val: str | None = None
+    _prior_original: dict | None = None
+    try:
+        from physicam.video import sha256_file as _sha
+
+        _cost_key_val = _cost_key(_sha(Path(video_path)), question, nf)
+        _prior = _load_cost_registry(_cost_data_dir).get(_cost_key_val)
+        if isinstance(_prior, dict) and _prior:
+            _prior_original = {k: v for k, v in _prior.items() if k != "original"}
+    except Exception:
+        _cost_key_val, _prior_original = None, None
+
+    def _finalize_cost() -> dict:
+        cost = cost_now()
+        if not isinstance(cost, dict):
+            cost = {"sam_frames": 0, "spark_tokens": 0, "usd_estimate": 0.0}
+        cost = {k: v for k, v in cost.items() if k != "original"}
+        if _prior_original:
+            cost["original"] = dict(_prior_original)
+        elif _is_live_cost(cost) and _cost_key_val:
+            snapshot = dict(cost)
+            registry = _load_cost_registry(_cost_data_dir)
+            registry[_cost_key_val] = snapshot
+            _save_cost_registry(_cost_data_dir, registry)
+            cost["original"] = dict(snapshot)
+        return cost
 
     def cost_now() -> dict:
         try:
@@ -331,7 +401,7 @@ def run_job(job_dir, video_path, question: str, facts: dict | None = None,
 
         # 5. done -----------------------------------------------------------
         result["status"] = "done"
-        result["cost"] = cost_now()
+        result["cost"] = _finalize_cost()
         _write_result(job_dir, result)
         safe_emit({"type": "done"})
         return result
