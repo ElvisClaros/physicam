@@ -1,0 +1,30 @@
+[build-system]
+
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "physicam"
+version = "0.1.0"
+description = "Turn any phone video into a quantitative physics measurement"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pillow>=10",
+    "imageio-ffmpeg>=0.4",
+    "meta-sam-parser>=0.1",
+    "fastapi>=0.100",
+    "uvicorn>=0.23",
+    "python-multipart>=0.0.6",
+    "httpx>=0.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["physicam*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
