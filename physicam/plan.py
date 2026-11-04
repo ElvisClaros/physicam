@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,7 @@ class Plan:
     moving_objects: list[MovingObject] = field(default_factory=list)
     reference_candidates: list[ReferenceCandidate] = field(default_factory=list)
     spoken_facts: str = ""
+    facts_extracted: list[dict] = field(default_factory=list)
     time_window_s: list[float] | None = None
     slow_motion: bool = False
     capture_fps_guess: float | None = None
@@ -75,6 +77,8 @@ class Plan:
             reference_candidates=[ReferenceCandidate(**{k: r.get(k) for k in ("sam_prompt", "real_size_m", "dimension", "confidence", "why") if k in r})
                                   for r in (d.get("reference_candidates") or []) if isinstance(r, dict) and r.get("sam_prompt")],
             spoken_facts=str(d.get("spoken_facts", "") or ""),
+            facts_extracted=_normalize_fact_list(d.get("facts_extracted"))
+            or extract_facts_from_text(str(d.get("spoken_facts", "") or "")),
             time_window_s=list(d["time_window_s"]) if d.get("time_window_s") else None,
             slow_motion=bool(d.get("slow_motion", False)),
             capture_fps_guess=d.get("capture_fps_guess"),
@@ -101,6 +105,7 @@ class Plan:
             "model": self.recommended_model,
             "recommended_model": self.recommended_model,
             "spoken_facts": self.spoken_facts,
+            "facts_extracted": [dict(f) for f in self.facts_extracted],
             "time_window_s": self.time_window_s,
             "slow_motion": self.slow_motion,
             "capture_fps_guess": self.capture_fps_guess,
@@ -120,6 +125,97 @@ def default_sam_prompts(prompt: str) -> list[str]:
         if cand and len(cand.split()) <= 3 and cand not in out:
             out.append(cand)
     return out[:4] or [str(prompt)]
+
+
+_UNIT_TO_M = {
+    "cm": 0.01, "centimeter": 0.01, "centimeters": 0.01,
+    "centimetre": 0.01, "centimetres": 0.01,
+    "mm": 0.001, "millimeter": 0.001, "millimeters": 0.001,
+    "millimetre": 0.001, "millimetres": 0.001,
+    "m": 1.0, "meter": 1.0, "meters": 1.0, "metre": 1.0, "metres": 1.0,
+    "in": 0.0254, "inch": 0.0254, "inches": 0.0254,
+    "ft": 0.3048, "foot": 0.3048, "feet": 0.3048,
+}
+_MEASURE_RE = re.compile(
+    r"(?P<value>\d+(?:\.\d+)?|\.\d+)\s*"
+    r"(?P<unit>centimetres?|centimeters?|cm|millimetres?|millimeters?|mm|metres?|meters?|m|inches|inch|in|feet|foot|ft)\b",
+    re.IGNORECASE)
+_REFERS_CANDIDATES = ["door frame", "string", "cord", "thread", "pendulum", "bob",
+                      "ball", "bottle", "keys", "key", "ruler", "tape measure",
+                      "table", "floor", "ramp", "cart", "spring"]
+
+
+def _normalize_fact_list(raw) -> list[dict]:
+    """Normalise a raw facts_extracted list to the canonical shape."""
+    out: list[dict] = []
+    if not isinstance(raw, (list, tuple)):
+        return out
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        quantity = str(item.get("quantity", "length") or "length").lower().strip()
+        if quantity not in ("length", "height", "diameter", "distance"):
+            quantity = "length"
+        value = item.get("value_m", item.get("value", item.get("size_m")))
+        try:
+            value_m = float(value)
+        except (TypeError, ValueError):
+            continue
+        out.append({"quantity": quantity, "value_m": value_m,
+                    "refers_to": str(item.get("refers_to", "") or ""),
+                    "quote": str(item.get("quote", "") or "")})
+    return out
+
+
+def extract_facts_from_text(text: str) -> list[dict]:
+    """Extract lengths/heights/diameters/distances with units from free text.
+
+    Returns ``[{quantity, value_m, refers_to, quote}]`` with values in
+    metres. Deterministic regex extraction, used for spoken_facts and
+    for user question/fact text.
+    """
+    text = str(text or "")
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    for match in _MEASURE_RE.finditer(text):
+        try:
+            value_m = float(match.group("value")) * _UNIT_TO_M[match.group("unit").lower()]
+        except (KeyError, ValueError):
+            continue
+        lo = max(0, match.start() - 60)
+        hi = min(len(text), match.end() + 30)
+        window = text[lo:hi].lower()
+        if "diameter" in window or "across" in window:
+            quantity = "diameter"
+        elif "height" in window or "tall" in window or "drop" in window:
+            quantity = "height"
+        elif "distance" in window or "away from" in window:
+            quantity = "distance"
+        else:
+            quantity = "length"
+        refers_to = ""
+        for cand in _REFERS_CANDIDATES:
+            if cand in window:
+                refers_to = cand
+                break
+        if quantity == "diameter" and not refers_to:
+            refers_to = "bob"
+        # Quote: the containing sentence/fragment.
+        start = max(text.rfind(sep, 0, match.start()) for sep in ".\n;") + 1
+        ends = [p for p in (text.find(sep, match.end()) for sep in ".\n;") if p >= 0]
+        end = min(ends) if ends else len(text)
+        quote = text[start:end].strip() or text[lo:hi].strip()
+        key = (quantity, round(value_m, 9), refers_to)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"quantity": quantity, "value_m": float(value_m),
+                    "refers_to": refers_to, "quote": quote})
+    return out
+
+
+# Backwards-friendly alias.
+parse_spoken_facts = extract_facts_from_text
 
 
 def normalize_facts(facts: dict | None) -> dict:
@@ -150,12 +246,61 @@ def normalize_facts(facts: dict | None) -> dict:
             pass
     if f.get("dimension"):
         out["dimension"] = str(f["dimension"])
+    length = f.get("length_m", f.get("pendulum_length_m", f.get("length")))
+    if length is not None:
+        try:
+            out["length_m"] = float(length)
+        except (TypeError, ValueError):
+            pass
+    string_length = f.get("string_length_m", f.get("string_length"))
+    if string_length is not None:
+        try:
+            out["string_length_m"] = float(string_length)
+            out.setdefault("length_m", float(string_length))
+        except (TypeError, ValueError):
+            pass
+    bob_diam = f.get("bob_diameter_m")
+    if bob_diam is not None:
+        try:
+            out["bob_diameter_m"] = float(bob_diam)
+        except (TypeError, ValueError):
+            pass
+    if f.get("length_m_stderr") is not None:
+        try:
+            out["length_m_stderr"] = float(f["length_m_stderr"])
+        except (TypeError, ValueError):
+            pass
+    extracted = _normalize_fact_list(f.get("facts_extracted"))
+    spoken = f.get("spoken_facts") or f.get("spoken") or f.get("narration")
+    if spoken:
+        out["spoken_facts"] = str(spoken)
+        if not extracted:
+            extracted = extract_facts_from_text(str(spoken))
+    if extracted:
+        out["facts_extracted"] = extracted
+        for fact in extracted:
+            if fact["quantity"] == "length" and "length_m" not in out:
+                out["length_m"] = float(fact["value_m"])
+            if fact["quantity"] == "diameter" and "diameter_m" not in out:
+                out["diameter_m"] = float(fact["value_m"])
+    elif out.get("length_m") is not None:
+        out["facts_extracted"] = [{"quantity": "length", "value_m": float(out["length_m"]),
+                                    "refers_to": str(f.get("length_refers_to", "") or ""),
+                                    "quote": str(f.get("quote", "") or "")}]
     return out
 
 
 def apply_facts(plan: Plan, facts: dict | None) -> Plan:
     """User explicit facts override everything in the plan."""
     nf = normalize_facts(facts)
+    if nf.get("facts_extracted"):
+        merged = [dict(f) for f in nf["facts_extracted"]]
+        for fact in plan.facts_extracted:
+            if fact not in merged:
+                merged.append(fact)
+        plan.facts_extracted = merged
+    elif not plan.facts_extracted and plan.spoken_facts:
+        plan.facts_extracted = extract_facts_from_text(plan.spoken_facts)
     if nf.get("fps_override"):
         plan.capture_fps_guess = float(nf["fps_override"])
         plan.slow_motion = True
@@ -193,6 +338,13 @@ def _schema() -> dict:
                     "why": {"type": "string"}},
                 "required": ["sam_prompt", "real_size_m", "dimension", "confidence", "why"]}},
             "spoken_facts": {"type": "string"},
+            "facts_extracted": {"type": "array", "items": {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "quantity": {"type": "string", "enum": ["length", "height", "diameter", "distance"]},
+                    "value_m": {"type": "number"}, "refers_to": {"type": "string"},
+                    "quote": {"type": "string"}},
+                "required": ["quantity", "value_m", "refers_to", "quote"]}},
             "time_window_s": {"type": ["array", "null"], "items": {"type": "number"}},
             "slow_motion": {"type": "boolean"},
             "capture_fps_guess": {"type": ["number", "null"]},
@@ -204,7 +356,7 @@ def _schema() -> dict:
                                 "required": ["quantity", "unit"]},
         },
         "required": ["experiment", "phenomenon", "moving_objects", "reference_candidates",
-                     "spoken_facts", "time_window_s", "slow_motion", "capture_fps_guess",
+                     "spoken_facts", "facts_extracted", "time_window_s", "slow_motion", "capture_fps_guess",
                      "camera_static", "quality_issues", "recommended_model", "target_quantity"],
     }
 
@@ -229,10 +381,13 @@ def heuristic_plan(question: str, facts: dict | None = None) -> Plan:
     candidates = [prompt] + (["ball"] if "ball" in q else ["object"])
     target = {"quantity": "coefficient of restitution", "unit": ""} if phen == "bounce" and "restitution" in q else \
         {"quantity": "g", "unit": "m/s^2"} if "g" in q.split() or "gravity" in q else {"quantity": "", "unit": ""}
+    extracted = extract_facts_from_text(question or "")
     plan = Plan(experiment=f"Measure {target['quantity'] or phen} from video",
                 phenomenon=phen, moving_objects=[MovingObject(sam_prompt=prompt, role="moving",
                                                               description="primary moving object",
                                                               sam_prompts=candidates[:4])],
+                spoken_facts=(question if extracted else ""),
+                facts_extracted=extracted,
                 recommended_model=model, target_quantity=target)
     return apply_facts(plan, nf)
 
@@ -259,6 +414,11 @@ def plan_experiment(client, proxy_video_path, question: str, facts: dict | None 
         f"User question: {question}\n"
         f"User-provided facts (override everything else): {json.dumps(nf)}\n\n"
         "Watch and listen: narration may state lengths, fps or other facts - put them in spoken_facts.\n"
+        "Explicitly capture every spoken length, height, diameter or distance with its unit in "
+        "facts_extracted as {quantity: \"length\"|\"height\"|\"diameter\"|\"distance\", value_m: <metres, "
+        "converted from cm/mm/in/ft>, refers_to: <what it describes, e.g. \"string\">, quote: <exact spoken "
+        "words>}. Example: \"the string is 80 cm\" -> {quantity: \"length\", value_m: 0.80, refers_to: "
+        "\"string\", quote: \"the string is 80 cm\"}. Also keep the full spoken text in spoken_facts.\n"
         "For moving_objects give sam_prompt as ONE short phrase of 1-3 words (colour/material + noun, "
         "e.g. \"red ball\", \"metal ball\", \"spring\") and sam_prompts with 2-4 candidate prompts per object, "
         "each also 1-3 words. Long descriptive prompts fail. "

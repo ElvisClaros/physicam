@@ -15,7 +15,7 @@ import numpy as np
 from physicam import calibrate as calib_mod
 from physicam.calibrate import Calibration
 from physicam.physics import fit_model as phys_fit
-from physicam.plan import Plan, normalize_facts
+from physicam.plan import Plan, extract_facts_from_text, normalize_facts
 from physicam.sandbox import run_python as sandbox_run
 
 SYSTEM_PROMPT = """You are a careful experimental physicist measuring physics from video.
@@ -26,7 +26,12 @@ Rules:
 - Use track_objects first, then calibrate, then fit_model, inspect the fit, and finally call finish.
 - SAM prompts must be 1-3 words: colour/material + noun ("metal ball", "red ball", "spring"). Long descriptive prompts fail. Use track_objects with prompts=[...] to try 2-4 short candidates concurrently.
 - Prefer per-frame perspective calibration (calibrate_from_track per_frame) when the apparent size varies.
-- Keep steps efficient: at most a handful of tool calls."""
+- Keep steps efficient: at most a handful of tool calls.
+Pendulum measuring g:
+- fit_model(model="pendulum", options={"length_m": L}) computes g = 4*pi^2*L/T0^2, where T0 is the measured period T with the finite-amplitude correction, from a circle fit to the bob path plus a damped-sinusoid fit on theta(t). A known length therefore gives g directly, without needing pixel calibration.
+- Spoken or user facts must be passed through to the fit: look in facts, facts_extracted and plan.facts_extracted / plan.spoken_facts for entries like {quantity: "length", value_m: 0.80, refers_to: "string"}. Pass that value_m as options.length_m. If a diameter fact for the bob is also present, also pass options={"bob_diameter_m": <value_m>} so a string length can be corrected to pivot-to-bob-centre.
+- Worked example: the user said "the string is 80 cm", so facts_extracted contains a length of 0.80 m referring to the string; call fit_model(track_id="t0", model="pendulum", options={"length_m": 0.80}) and report the returned g (with its uncertainty, usually dominated by the length uncertainty).
+- If no length fact and no calibration is available, the pendulum fit returns T, T0 and theta0 plus L_predicted_m, the length implied by assuming g=9.81. That predicted length is a derived fact, never a measurement of g: do not finish with it as if g had been measured."""
 
 TOOLS: list[dict] = [
     {"type": "function", "name": "track_objects", "description": "Track objects with SAM 3.1. Each prompt must be 1-3 words: colour/material + noun (\"metal ball\", \"red ball\", \"spring\"); long descriptive prompts fail and will be simplified. Pass prompts=[...] with 2-4 short candidates to run them concurrently. Returns stitched track summaries with ids.",
@@ -46,7 +51,7 @@ TOOLS: list[dict] = [
      "parameters": {"type": "object", "properties": {
          "track_id": {"type": "string"}, "t_start": {"type": ["number", "null"]}, "t_end": {"type": ["number", "null"]}},
          "required": ["track_id"], "additionalProperties": False}},
-    {"type": "function", "name": "fit_model", "description": "Fit a physics model (free_fall, projectile, bounce, pendulum, oscillator, constant_velocity, polynomial). Returns params, r2, rmse_px, warnings, segments.",
+    {"type": "function", "name": "fit_model", "description": "Fit a physics model (free_fall, projectile, bounce, pendulum, oscillator, constant_velocity, polynomial). Returns params, r2, rmse_px, warnings, segments. For pendulum: options={\"length_m\": L} (metres, from a spoken/user length fact in facts_extracted) computes g=4*pi^2*L/T0^2 with the finite-amplitude correction, so pass spoken/user length facts through as length_m (e.g. user said 80 cm -> options={\"length_m\": 0.80}); also pass options={\"bob_diameter_m\": D} when the bob diameter is known. With a calibration instead, g comes from the circle-fit L_px*m_per_px. With neither, pendulum returns T, T0, theta0_deg and L_predicted_m (length implied by g=9.81), and no g.",
      "parameters": {"type": "object", "properties": {
          "track_id": {"type": "string"}, "model": {"type": "string"},
          "t_start": {"type": ["number", "null"]}, "t_end": {"type": ["number", "null"]},
@@ -171,6 +176,88 @@ def _trange(a, b):
     if a is None and b is None:
         return None
     return [float(a) if a is not None else -1e18, float(b) if b is not None else 1e18]
+
+
+def _all_facts_extracted(plan, facts=None) -> list[dict]:
+    """All structured length/height/diameter/distance facts for a job.
+
+    Merges user facts (normalised) with the plan's facts_extracted and
+    anything extractable from plan.spoken_facts. User facts come first.
+    """
+    out: list[dict] = []
+
+    def _add(fact):
+        if isinstance(fact, dict) and fact.get("value_m") is not None:
+            key = (str(fact.get("quantity", "")), float(fact["value_m"]),
+                   str(fact.get("refers_to", "")))
+            if key not in [(str(f.get("quantity", "")), float(f["value_m"]),
+                            str(f.get("refers_to", ""))) for f in out]:
+                out.append({"quantity": str(fact.get("quantity", "length")),
+                            "value_m": float(fact["value_m"]),
+                            "refers_to": str(fact.get("refers_to", "") or ""),
+                            "quote": str(fact.get("quote", "") or "")})
+
+    nf = normalize_facts(facts) if facts else {}
+    for fact in nf.get("facts_extracted") or []:
+        _add(fact)
+    if plan is not None:
+        for fact in getattr(plan, "facts_extracted", None) or []:
+            _add(fact)
+        spoken = getattr(plan, "spoken_facts", "") or ""
+        if spoken:
+            for fact in extract_facts_from_text(str(spoken)):
+                _add(fact)
+    if nf.get("length_m") is not None and not any(f["quantity"] == "length" for f in out):
+        _add({"quantity": "length", "value_m": float(nf["length_m"]), "refers_to": "", "quote": ""})
+    return out
+
+
+def _pendulum_fit_options(plan, facts=None) -> dict | None:
+    """fit_model options for a pendulum from spoken/user length facts.
+
+    Returns {"length_m": L, ...} or None when no length fact exists.
+    A length referring to the string is flagged, and a known bob
+    diameter is passed through so physics can add the bob radius.
+    """
+    nf = normalize_facts(facts) if facts else {}
+    extracted = _all_facts_extracted(plan, facts)
+    length_facts = [f for f in extracted if f.get("quantity") == "length"]
+    length_fact = None
+    for fact in length_facts:
+        blob = f"{fact.get('refers_to', '')} {fact.get('quote', '')}".lower()
+        if any(word in blob for word in ("string", "pendulum", "cord")):
+            length_fact = fact
+            break
+    if length_fact is None and length_facts:
+        length_fact = length_facts[0]
+    length_m = nf.get("length_m")
+    if length_m is None and length_fact is not None:
+        length_m = length_fact.get("value_m")
+    if length_m is None and nf.get("string_length_m") is not None:
+        length_m = nf["string_length_m"]
+    if length_m is None:
+        return None
+    options: dict = {"length_m": float(length_m)}
+    blob = ""
+    if length_fact is not None:
+        blob = f"{length_fact.get('refers_to', '')} {length_fact.get('quote', '')}".lower()
+        if length_fact.get("refers_to"):
+            options["length_refers_to"] = str(length_fact["refers_to"])
+        if length_fact.get("quote"):
+            options["length_quote"] = str(length_fact["quote"])
+    if nf.get("string_length_m") is not None or "string" in blob or "cord" in blob:
+        options["length_is_string"] = True
+    if nf.get("length_m_stderr") is not None:
+        options["length_m_stderr"] = float(nf["length_m_stderr"])
+    bob_d = nf.get("bob_diameter_m", nf.get("diameter_m"))
+    if bob_d is None:
+        for fact in extracted:
+            if fact.get("quantity") == "diameter":
+                bob_d = fact.get("value_m")
+                break
+    if bob_d is not None:
+        options["bob_diameter_m"] = float(bob_d)
+    return options
 
 
 class AgentSession:
@@ -494,10 +581,14 @@ def run_agent_loop(session: AgentSession, max_steps: int = 12, timeout_s: float 
     start = time.time()
     context = {
         "question": session.question, "facts": session.facts,
+        "facts_extracted": _all_facts_extracted(session.plan, session.facts),
         "plan": session.plan.to_dict(),
         "fps": session.fps, "video": session.video_path,
         "instructions": "Track, calibrate, fit, check fit quality, then finish. "
-                        "Calibration preference and never-invent-numbers rules are in the system prompt.",
+                        "Calibration preference and never-invent-numbers rules are in the system prompt. "
+                        "For a pendulum, pass any length in facts_extracted through as "
+                        "fit_model options.length_m (spoken example: \"the string is 80 cm\" -> "
+                        "options={\"length_m\": 0.80}) to compute g.",
         "pre_tracked": session.pre_summary,
     }
     body: dict = {
@@ -688,11 +779,14 @@ def run_fallback(session: AgentSession) -> AgentResult:
     if session.calibration is None:
         session.calibration = calib_mod.none()
     t0 = time.time()
-    # Pendulum length option from spoken/facts is not parsed; keep model defaults.
+    # Pendulum: pass spoken/user length facts through as length_m.
+    fit_options = _pendulum_fit_options(plan, session.facts) if model == "pendulum" else None
     tw = plan.time_window_s if getattr(plan, "time_window_s", None) else None
-    fit_out = (session.tool_fit_model(track.id, model, float(tw[0]), float(tw[1]))
-               if tw and len(tw) == 2 else session.tool_fit_model(track.id, model))
-    session._trace(step, "fit_model", {"track_id": track.id, "model": model}, json.dumps(fit_out)[:2000],
+    fit_out = (session.tool_fit_model(track.id, model, float(tw[0]), float(tw[1]), options=fit_options)
+               if tw and len(tw) == 2 else session.tool_fit_model(track.id, model, options=fit_options))
+    session._trace(step, "fit_model", {"track_id": track.id, "model": model,
+                                       **({"options": fit_options} if fit_options else {})},
+                   json.dumps(fit_out)[:2000],
                    int((time.time() - t0) * 1000), result=fit_out)
     fit = session.fits[-1] if session.fits else None
     answer = _primary_answer(fit, plan, session.question, session.calibration)

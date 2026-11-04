@@ -136,3 +136,14 @@ def test_outlier_rejection():
     calib = Calibration(m_per_px=9.81 / g_px, rel_uncertainty=0.0, method="reference", details="")
     fit = fit_model(track, "free_fall", calib)
     assert abs(fit.params["g"]["value"] - 9.81) / 9.81 < 0.02
+
+def test_velocity_stderr_includes_linear_and_covariance():
+    import math
+    from physicam.physics import _velocity_stderr
+    # v = 2*a2*t + a1; Var = (2t)^2 Var(a2) + Var(a1) + 4t Cov(a2,a1)
+    cov = [[0.04, 0.01, 0.0], [0.01, 0.09, 0.0], [0.0, 0.0, 1.0]]
+    got = _velocity_stderr(cov, 0.5)
+    assert abs(got - math.sqrt(1.0 * 0.04 + 0.09 + 2.0 * 1.0 * 0.01)) < 1e-12
+    # quadratic-only estimate would be 2t*sigma_a2 = 0.2; full must differ
+    assert got > 0.2
+    assert _velocity_stderr(None, 1.0) == 0.0
