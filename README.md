@@ -35,9 +35,12 @@ flowchart LR
 
 | Meta model | How Physicam uses it |
 | --- | --- |
-| Muse Spark (`muse-spark-1.3`) | Watches a 640 px / 30 fps proxy video and returns a strict-JSON experiment plan (objects, 2–4 short SAM prompts per object, physical model, reference candidates). Then runs as the tool-calling agent (≤ ~12 steps): tracks, calibrates, fits, inspects residuals and refits. Also transcribes spoken questions via the voice endpoint used by the mic button. |
-| SAM 3.1 (`sam-3.1`) | Video concept segmentation, one request per short noun phrase ("red ball", "spring"). Returns per-frame boxes and compressed masks, parsed with the official `meta-sam-parser`. Image mode calibrates reference objects in a still frame. |
-| Muse Wonder (`muse-wonder-1.0`) | Writes only the final lab report (markdown) from the finished result JSON. Slower and pricier, so it is used once, at the end. |
+| Muse Spark (`muse-spark-1.3`), video understanding | Watches a 640 px / 30 fps proxy of the clip **with its audio** and returns a strict-JSON experiment plan: phenomenon, 2–4 short SAM prompts per moving object, reference objects of standard size, and **spoken facts** ("the string is 80 cm") extracted into structured `facts_extracted`. |
+| Muse Spark (`muse-spark-1.3`), tool-calling agent | Acts as an experimental physicist (≤ 12 steps) with tools: `track_objects`, `calibrate_reference`, `calibrate_from_track`, `calibrate_from_gravity`, `fit_model`, `inspect_frames` (Spark vision on extracted frames), `run_python` (sandboxed numpy/scipy, no keys or network) and `finish`. It must take every number in its answer from a tool output. In a real run, SAM found nothing for "silver metal weight"; the agent looked at frames, retried with "metal ball", split the fit into windows to check consistency, and only then answered. |
+| SAM 3.1 (`sam-3.1`) | Video concept segmentation at full frame rate (240 fps clips included), with candidate prompts tracked **concurrently**. Masks are decoded with Meta's official `meta-sam-parser` and used quantitatively: sub-pixel centroids, apparent size for per-frame perspective correction, and the strobe composite. Image mode segments static reference objects for calibration. |
+| Muse Wonder (`muse-wonder-1.0`) | Writes the final lab report (method, results table, comparison with accepted values, error sources, how to measure better) from the finished result JSON. |
+| Muse Voice Transcribe (`muse-voice-transcribe-1.0`) | Hold-to-talk spoken questions in the UI (`POST /api/transcribe` converts browser audio to 16 kHz WAV and calls `/v1/asr/transcribe`). |
+| Muse Code | Wrote the code base, milestone by milestone, from the specs in [docs/muse-code-tasks/](docs/muse-code-tasks/) (see below). |
 
 Every Meta call goes through `physicam/meta_client.py`, and expensive
 results are cached on disk under `data/cache/` keyed by the video's
@@ -51,11 +54,27 @@ SHA-256 plus request parameters, so demos replay instantly and offline.
   the raster is smaller than the frame. Tracks are stitched across
   occlusions and de-duplicated (SAM ids are not stable through exit and
   re-entry).
-- **Calibration hierarchy.** (1) A reference object of known size segmented
-  in a frame; (2) the tracked object's known diameter from its mask size;
-  (3) **gravity as a ruler** — assume g = 9.81 m/s² and solve for the scale
-  (reported honestly as `method: gravity`); (4) no calibration, in which
+- **Calibration hierarchy.** (1) Facts given by the user or **spoken in the
+  video's narration**; (2) a reference object of standard size (A4 sheet,
+  credit card…) segmented by SAM in a frame; (3) the tracked object's known
+  diameter from its mask size; (4) **gravity as a ruler**: assume
+  g = 9.81 m/s² and solve for the scale, never used when the question is
+  about g, and reported as `method: gravity`; (5) no calibration, in which
   case results stay in pixel units rather than inventing metres.
+- **Per-frame perspective correction.** A ball flying toward the camera
+  looks like it accelerates. Under a pinhole camera, apparent size ∝ 1/depth,
+  so Physicam rescales every frame by the object's smoothed apparent
+  diameter from its SAM mask. On the real 240 fps bounce clip, this cut the
+  disagreement between the g values of two flights from **5.68 % to
+  0.27 %**. A constant scale is used when the size is stable.
+- **Pendulum geometry.** A circle fit (Kåsa, then Gauss–Newton) to the
+  bob's path gives the pivot and the length in pixels. The swing is fitted
+  in the angle domain θ(t), corrected for finite amplitude
+  (T₀ = T / (1 + θ₀²/16 + 11θ₀⁴/3072)), and turned into
+  g = 4π²L/T₀² using a length heard in the narration, given by the user, or
+  measured through the calibration. In a full nonlinear simulation
+  (L = 0.80 m, θ₀ = 25°), g is recovered within 0.26 %; without the
+  amplitude correction the error would be 2.1 %.
 - **Models.** Free fall / projectile, bounce (per-flight parabolas,
   per-impact restitution, pooled g), pendulum and spring oscillator
   (damped sinusoid; period, damping, Q, and g from a known length with the
@@ -110,18 +129,32 @@ Tests: `.venv/bin/python -m pytest -q`
 ## Built during the hackathon with Muse Code
 
 Physicam was built for the Meta Global AI Developer Hackathon (*Push the
-Frontier*). The code was written by the Muse Code agent
-(**muse-wonder-1.0**) from the task specs in
-[docs/muse-code-tasks/](docs/muse-code-tasks/), with a human lead
-engineer reviewing, validating against real footage and committing. The
-specs are kept in the repo so judges can see exactly what was asked for
-and check the result against it.
+Frontier*), from scratch, on Nov 3–4, 2026; the git history shows the
+progression. The code was written by the Muse Code agent
+(**muse-wonder-1.0**, running headless with `muse exec` in a sandboxed
+container) from the task specs in
+[docs/muse-code-tasks/](docs/muse-code-tasks/). Each milestone was then
+reviewed, validated against real footage and committed by the project lead.
+Some milestones ran in parallel (backend and UI against a shared JSON
+contract in [AGENTS.md](AGENTS.md)). The specs are kept in the repo so you
+can see exactly what was asked for and check the result against it.
+
+| Spec | What Muse Code built |
+| --- | --- |
+| [01-core](docs/muse-code-tasks/01-core.md) | Meta client, video I/O, SAM 3.1 tracking + stitching, calibration, physics fits, tests |
+| [02-agent-server](docs/muse-code-tasks/02-agent-server.md) | Spark planner, tool-calling agent, sandbox, Wonder report, pipeline, FastAPI + SSE, perspective correction |
+| [03-web-ui](docs/muse-code-tasks/03-web-ui.md), [04a](docs/muse-code-tasks/04a-ui-fixes.md) | The instrument UI: overlays, linked charts, timeline, strobe view |
+| [04-integration-strobe](docs/muse-code-tasks/04-integration-strobe.md) | End-to-end contract fixes found on real runs, concurrent tracking, strobe composite |
+| [05-examples-readme-static](docs/muse-code-tasks/05-examples-readme-static.md) | Examples, docs, static demo mode |
+| [06-pendulum-g](docs/muse-code-tasks/06-pendulum-g.md) | Circle-fit pendulum, finite-amplitude correction, spoken-length facts |
+| [07-final-polish](docs/muse-code-tasks/07-final-polish.md) | Honest split-half uncertainties, report figure, provenance line |
 
 ## Limitations and next steps
 
-- **2D only.** A single camera measures a plane; motion toward or away
-  from the camera appears as a scale change (see the bounce caveat
-  above). Depth/perspective correction and stereo are next steps.
+- **Mostly 2D.** A single camera measures a plane. Motion toward or away
+  from the camera is corrected through per-frame scale only when the
+  object's real size is known. Full 3D trajectories (depth from apparent
+  size, with gravity calibrating the focal length) are a next step.
 - **Rolling shutter and phone VFR.** Phone sensors skew fast motion and
   many phones record variable frame rates; Physicam normalises to CFR
   but cannot undo shutter skew. Capture-fps overrides help for slow-mo.
