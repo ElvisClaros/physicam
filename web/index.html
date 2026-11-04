@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Physicam — measure physics from any video</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 40 40" width="34" height="34" aria-hidden="true">
+      <circle cx="20" cy="20" r="15" fill="none" stroke="currentColor" stroke-width="2"/>
+      <circle cx="20" cy="20" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/>
+      <path d="M4 31 Q20 6 36 31" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/>
+      <circle cx="11" cy="21" r="2" fill="var(--accent)"/><circle cx="20" cy="15.5" r="2" fill="var(--accent)"/><circle cx="29" cy="21" r="2" fill="var(--accent)"/>
+    </svg>
+    <div>
+      <div class="wordmark">Physicam</div>
+      <div class="tagline">Film anything that moves. Ask a question. Get a measurement.</div>
+    </div>
+  </div>
+  <div class="badges" aria-label="Models">
+    <span class="badge badge-spark">Muse Spark</span>
+    <span class="badge badge-sam">SAM 3.1</span>
+    <span class="badge badge-wonder">Muse Wonder</span>
+  </div>
+</header>
+
+<main class="layout">
+  <!-- Left: input -->
+  <section class="panel panel-input" aria-label="Input">
+    <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Drop a video or choose a file">
+      <svg viewBox="0 0 48 48" width="40" height="40" aria-hidden="true"><path d="M6 38 Q24 8 42 38" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round"/><circle cx="14" cy="27" r="3" fill="var(--accent)"/><circle cx="24" cy="19" r="3" fill="var(--accent)"/><circle cx="34" cy="27" r="3" fill="var(--accent)"/></svg>
+      <p class="dz-title">Drop a video of something moving</p>
+      <p class="dz-sub">or <span class="dz-link">choose a file</span> · MP4 / MOV</p>
+      <p id="dz-file" class="dz-file" hidden></p>
+      <input id="file-input" type="file" accept="video/*,.mp4,.mov,.webm" hidden>
+    </div>
+
+    <div id="examples-wrap" hidden>
+      <h2 class="panel-h">Examples</h2>
+      <div id="examples" class="examples"></div>
+    </div>
+
+    <label class="field-label" for="question">Question</label>
+    <div class="chips" id="chips">
+      <button type="button" class="chip">What is g?</button>
+      <button type="button" class="chip">Coefficient of restitution?</button>
+      <button type="button" class="chip">Period of the pendulum?</button>
+      <button type="button" class="chip">How fast is it moving?</button>
+    </div>
+    <div class="q-row">
+      <textarea id="question" rows="3" placeholder="What is g?">What is g?</textarea>
+      <button id="mic" type="button" class="mic" title="Hold to talk" aria-label="Hold to talk">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 15a3.5 3.5 0 0 0 3.5-3.5v-5a3.5 3.5 0 1 0-7 0v5A3.5 3.5 0 0 0 12 15Z" fill="currentColor"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <p id="mic-status" class="mic-status" aria-live="polite"></p>
+
+    <details class="known">
+      <summary>Known facts <span class="known-hint">(optional, improves accuracy)</span></summary>
+      <label class="field-label" for="fact-ref">Reference object</label>
+      <input id="fact-ref" type="text" placeholder="e.g. credit card, A4 paper">
+      <label class="field-label" for="fact-ref-size">Its real size (m)</label>
+      <input id="fact-ref-size" type="number" min="0" step="any" placeholder="0.0856">
+      <label class="field-label" for="fact-fps">Capture fps override (slow motion)</label>
+      <input id="fact-fps" type="number" min="0" step="any" placeholder="e.g. 240">
+      <label class="field-label" for="fact-diameter">Moving object diameter (m)</label>
+      <input id="fact-diameter" type="number" min="0" step="any" placeholder="e.g. 0.08">
+    </details>
+
+    <button id="measure" type="button" class="measure">Measure</button>
+    <p id="job-status" class="job-status" aria-live="polite"></p>
+  </section>
+
+  <!-- Center: stage -->
+  <section class="panel panel-stage" aria-label="Video stage">
+    <div id="stage" class="stage">
+      <video id="video" playsinline muted loop preload="metadata"></video>
+      <canvas id="overlay"></canvas>
+      <div id="hud" class="hud" hidden></div>
+      <div id="empty-state" class="empty-state">
+        <svg viewBox="0 0 320 170" width="300" height="160" aria-hidden="true">
+          <path d="M20 150 Q160 10 300 150" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="5 6"/>
+          <circle cx="52" cy="98" r="5" fill="var(--accent)" opacity=".45"/><circle cx="105" cy="58" r="5" fill="var(--accent)" opacity=".65"/>
+          <circle cx="160" cy="42" r="5" fill="var(--accent)"/><circle cx="215" cy="58" r="5" fill="var(--accent)" opacity=".65"/><circle cx="268" cy="98" r="5" fill="var(--accent)" opacity=".45"/>
+          <line x1="14" y1="156" x2="306" y2="156" stroke="var(--border)" stroke-width="2"/>
+        </svg>
+        <p>Drop a video of something moving</p>
+      </div>
+    </div>
+    <div class="transport">
+      <button id="btn-play" type="button" class="tbtn" title="Play / pause (space)">▶</button>
+      <button id="btn-prev" type="button" class="tbtn" title="Previous frame (←)">⏮</button>
+      <button id="btn-next" type="button" class="tbtn" title="Next frame (→)">⏭</button>
+      <label class="speed-label">Speed
+        <select id="speed">
+          <option value="0.1">0.1×</option><option value="0.25">0.25×</option>
+          <option value="0.5">0.5×</option><option value="1" selected>1×</option>
+        </select>
+      </label>
+      <span class="toggles">
+        <label><input type="checkbox" id="tog-masks" checked> masks</label>
+        <label><input type="checkbox" id="tog-trail" checked> trail</label>
+        <label><input type="checkbox" id="tog-fit" checked> fit</label>
+      </span>
+      <span id="time-readout" class="time-readout"></span>
+    </div>
+    <div id="track-legend" class="track-legend"></div>
+  </section>
+
+  <!-- Right: timeline -->
+  <section class="panel panel-timeline" aria-label="Agent timeline">
+    <h2 class="panel-h">Agent timeline</h2>
+    <div id="timeline" class="timeline">
+      <p class="timeline-empty">Steps will appear here as Muse Spark plans, SAM 3.1 tracks and Muse Wonder reports.</p>
+    </div>
+  </section>
+
+  <!-- Bottom: results -->
+  <section class="results" aria-label="Results">
+    <div id="answer-card" class="answer-card" hidden>
+      <div class="answer-main">
+        <div id="answer-value" class="answer-value"></div>
+        <div id="answer-headline" class="answer-headline"></div>
+        <div id="answer-delta" class="answer-delta"></div>
+      </div>
+      <p id="answer-summary" class="answer-summary"></p>
+    </div>
+
+    <div id="fits-wrap" hidden>
+      <h2 class="panel-h">Fitted parameters</h2>
+      <div id="fits"></div>
+    </div>
+
+    <div id="charts-wrap" class="charts" hidden>
+      <figure class="chart-box">
+        <figcaption>Vertical position vs time</figcaption>
+        <canvas id="chart-y" class="chart"></canvas>
+        <canvas id="chart-y-resid" class="chart chart-resid"></canvas>
+        <div class="chart-tip" hidden></div>
+      </figure>
+      <figure class="chart-box">
+        <figcaption>Horizontal position vs time</figcaption>
+        <canvas id="chart-x" class="chart"></canvas>
+        <div class="chart-tip" hidden></div>
+      </figure>
+      <figure class="chart-box">
+        <figcaption>Speed vs time</figcaption>
+        <canvas id="chart-speed" class="chart"></canvas>
+        <div class="chart-tip" hidden></div>
+      </figure>
+      <figure class="chart-box" id="chart-e-box" hidden>
+        <figcaption>Coefficient of restitution per impact</figcaption>
+        <canvas id="chart-e" class="chart"></canvas>
+        <div class="chart-tip" hidden></div>
+      </figure>
+    </div>
+
+    <article id="report-wrap" class="report" hidden>
+      <h2 class="panel-h">Lab report <span class="badge badge-wonder">Muse Wonder</span></h2>
+      <div id="report" class="report-body"></div>
+    </article>
+
+    <footer id="cost-line" class="cost-line" hidden></footer>
+  </section>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

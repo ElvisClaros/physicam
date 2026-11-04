@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+_probe/
+data/
+.pytest_cache/
+*.egg-info/
+web/mock/*.mp4
