@@ -113,7 +113,11 @@ def test_concurrent_multi_prompt_tracking(tmp_path):
     out = session.tool_track_objects(prompts=["red ball", "metal ball"])
     assert sorted(client.prompts) == ["metal ball", "red ball"]
     assert out["tracks"], out
-    assert len(session.tracks) >= 2  # distinct ids per prompt
+    # Same fixture for both prompts = same physical object: cross-prompt
+    # dedup keeps one track and records the other prompt as an alias.
+    assert len(out["tracks"]) == 1, out["tracks"]
+    assert len(session.tracks) == 1
+    assert out["tracks"][0]["aliases"], out["tracks"]
 
 
 def test_run_python_parses_json_stdout(tmp_path):

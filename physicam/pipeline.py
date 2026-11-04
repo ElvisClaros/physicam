@@ -127,14 +127,23 @@ def _pretrack(client, video_path, plan, fps: float):
     else:
         with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as pool:
             results = list(pool.map(_one, candidates))
+    # Cross-prompt dedup: candidate prompts may segment the same object.
+    from physicam.sam import deduplicate_tracks
+
+    flat: list = []
+    for prompt, tracks in results:
+        for tr in [t for t in (tracks or []) if t.n > 0]:
+            taken = {t.id for t in flat}
+            while tr.id in taken:
+                tr.id = f"t{int(tr.id[1:]) + 1}" if tr.id[1:].isdigit() else f"t{len(taken)}"
+            flat.append(tr)
+    deduped = deduplicate_tracks(flat) if flat else []
     pre: dict = {}
     parts: list[str] = []
-    for prompt, tracks in results:
-        kept = [t for t in (tracks or []) if t.n > 0]
-        if kept:
-            pre[prompt] = kept
-            for tr in kept[:2]:
-                parts.append(f"\u201c{tr.label}\u201d: {tr.n} frames ({float(tr.t[0]):.2f}\u2013{float(tr.t[-1]):.2f} s)")
+    for tr in deduped:
+        pre.setdefault(tr.label, []).append(tr)
+        alias = f" (aliases: {', '.join(tr.aliases)})" if tr.aliases else ""
+        parts.append(f"\u201c{tr.label}\u201d{alias}: {tr.n} frames ({float(tr.t[0]):.2f}\u2013{float(tr.t[-1]):.2f} s)")
     summary = ("pre-tracked: " + "; ".join(parts)) if parts else "pre-tracked: none"
     return pre, summary
 

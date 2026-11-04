@@ -129,7 +129,8 @@ def make_trace_title(name: str, args: dict, result) -> str:
         parts = []
         for tr in tracks[:3]:
             tr_range = tr.get("t_range") or [0, 0]
-            parts.append(f"SAM 3.1 tracked \u201c{tr.get('label', '')}\u201d: {tr.get('n_frames', 0)} frames "
+            alias = f" (aliases: {', '.join(tr['aliases'])})" if tr.get('aliases') else ""
+            parts.append(f"SAM 3.1 tracked \u201c{tr.get('label', '')}\u201d{alias}: {tr.get('n_frames', 0)} frames "
                          f"({_fmt_num(tr_range[0])}\u2013{_fmt_num(tr_range[1])} s)")
         title = "; ".join(parts)
         if simplified:
@@ -282,12 +283,27 @@ class AgentSession:
         self.answer: dict | None = None
         self.trace: list[dict] = []
         self.pre_summary = pre_summary or ""
-        for _prompt, _tracks in (pre_tracked or {}).items():
-            self._label_cache[str(_prompt).strip().lower()] = list(_tracks)
+        # Cross-prompt dedup: several candidate prompts may segment the
+        # same physical object; keep one track (aliases carry the rest).
+        _flat: list = []
+        for _tracks in (pre_tracked or {}).values():
             for _tr in _tracks:
-                if _tr.id in self.tracks:
-                    _tr.id = f"t{len(self.tracks)}"
-                self.tracks[_tr.id] = _tr
+                if _tr.id in {t.id for t in _flat}:
+                    _tr.id = f"t{len(_flat) + len(self.tracks)}"
+                    while _tr.id in {t.id for t in _flat}:
+                        _tr.id = f"t{int(_tr.id[1:]) + 1}" if _tr.id[1:].isdigit() else f"t{len(_flat)}"
+                _flat.append(_tr)
+        if _flat:
+            from physicam.sam import deduplicate_tracks
+
+            _flat = deduplicate_tracks(_flat)
+        for _tr in _flat:
+            if _tr.id in self.tracks:
+                _tr.id = f"t{len(self.tracks)}"
+            self.tracks[_tr.id] = _tr
+        for _prompt in (pre_tracked or {}):
+            kept = [t for t in _flat if t.label == str(_prompt) or str(_prompt) in (t.aliases or [])]
+            self._label_cache[str(_prompt).strip().lower()] = kept or list(_flat)
 
     # -- emit helpers -------------------------------------------------------
     def _trace(self, step: int, name: str, args: dict, summary: str, ms: int, title: str | None = None, result=None):
@@ -369,7 +385,7 @@ class AgentSession:
                                  conf=tr.conf[idx], eq_diameter=tr.eq_diameter[idx],
                                  contours={int(tr.frames[i]): tr.contours[int(tr.frames[i])]
                                            for i in idx if int(tr.frames[i]) in tr.contours},
-                                 fps=tr.fps))
+                                 fps=tr.fps, aliases=list(getattr(tr, "aliases", []) or [])))
             return out
 
         def _one(p: str):
@@ -384,21 +400,31 @@ class AgentSession:
         else:
             with ThreadPoolExecutor(max_workers=min(4, len(clean_prompts))) as pool:
                 results = list(pool.map(_one, clean_prompts))
-        all_tracks: list = []
         cached_any = False
+        raw_tracks: list = []
         for p, tracks, was_cached in results:
             cached_any = cached_any or was_cached
-            self._label_cache[p.strip().lower()] = tracks
             for tr in tracks:
-                if tr.id in self.tracks and self.tracks[tr.id] is not tr:
-                    tr.id = f"t{len(self.tracks)}"
-                    # Reassign subsequent duplicates deterministically.
-                    while tr.id in self.tracks:
-                        tr.id = f"t{int(tr.id[1:]) + 1}" if tr.id[1:].isdigit() else f"t{len(self.tracks)}"
-                if tr.id not in self.tracks:
-                    self.tracks[tr.id] = tr
-                    self._emit_track(tr)
-                all_tracks.append(tr)
+                taken = {t.id for t in raw_tracks} | {tid for tid, t in self.tracks.items() if t is not tr}
+                while tr.id in taken:
+                    tr.id = f"t{int(tr.id[1:]) + 1}" if tr.id[1:].isdigit() else f"t{len(taken)}"
+                raw_tracks.append(tr)
+        # Cross-prompt dedup: candidate prompts may all segment one object.
+        from physicam.sam import deduplicate_tracks
+
+        all_tracks = deduplicate_tracks(raw_tracks) if raw_tracks else []
+        kept_ids = {t.id for t in all_tracks}
+        for tr in raw_tracks:
+            if tr.id not in kept_ids and self.tracks.get(tr.id) is tr:
+                del self.tracks[tr.id]
+        for p, tracks, was_cached in results:
+            matched = [t for t in all_tracks if t.label == p or p in (t.aliases or [])]
+            self._label_cache[p.strip().lower()] = matched if matched else list(tracks)
+        for tr in all_tracks:
+            is_new = self.tracks.get(tr.id) is not tr
+            self.tracks[tr.id] = tr
+            if is_new:
+                self._emit_track(tr)
         out: dict = {"tracks": [t.summary() for t in all_tracks], "prompts": clean_prompts}
         if simplified:
             out["simplified"] = simplified

@@ -28,6 +28,7 @@ const state = {
   stageMode: "video",   // "video" | "strobe"
   currentStage: null,
   auxTracksVisible: new Set(), // auxiliary track ids toggled on via legend chips
+  otherFitsExpanded: false, // "Other fits" <details> in the params panel
 };
 
 function emptyResult() {
@@ -99,9 +100,21 @@ function infoLabel(key) { return INFO_LABELS[key] || key.replace(/_/g, " "); }
 
 /* ---------------- track visibility ---------------- */
 
-/** Ids of tracks referenced by at least one fit. */
+/** The primary fit: first id of answer.fit_ids, fallback the last fit. */
+function primaryFit() {
+  const fits = state.fits || [];
+  if (!fits.length) return null;
+  const id = (state.result?.answer?.fit_ids || [])[0];
+  return fits.find((f) => f.id === id) || fits[fits.length - 1];
+}
+/** Invalid impacts are never labelled with an e value. */
+function isInvalidImpact(im) {
+  return !im || im.valid === false || (im.e != null && isFinite(im.e) && im.e > 1.05);
+}
+/** Ids of tracks referenced by the primary fit only. */
 function fitTrackIds() {
-  return new Set((state.fits || []).map((f) => f.track_id).filter(Boolean));
+  const p = primaryFit();
+  return new Set(p && p.track_id ? [p.track_id] : []);
 }
 function trackFrameCount(track) {
   return (track?.t?.length ?? track?.frames?.length ?? 0);
@@ -372,14 +385,14 @@ function isDimensionless(unit) {
 }
 
 function eHeightCrossCheck() {
-  for (const fit of state.fits) {
-    const fromImpacts = (fit.impacts || []).find((im) => im.e_height != null && im.valid !== false);
-    if (fromImpacts) return { value: fromImpacts.e_height, stderr: null };
-    const raw = fit.e_height ?? fit.params?.e_height ?? fit.params?.eHeight;
-    if (raw == null) continue;
-    if (typeof raw === "number" && isFinite(raw)) return { value: raw, stderr: null };
-    if (typeof raw === "object" && isFinite(raw.value)) return { value: raw.value, stderr: raw.stderr ?? null };
-  }
+  const fit = primaryFit();
+  if (!fit) return null;
+  const fromImpacts = (fit.impacts || []).find((im) => im.e_height != null && !isInvalidImpact(im));
+  if (fromImpacts) return { value: fromImpacts.e_height, stderr: null };
+  const raw = fit.e_height ?? fit.params?.e_height ?? fit.params?.eHeight;
+  if (raw == null) return null;
+  if (typeof raw === "number" && isFinite(raw)) return { value: raw, stderr: null };
+  if (typeof raw === "object" && isFinite(raw.value)) return { value: raw.value, stderr: raw.stderr ?? null };
   return null;
 }
 
@@ -387,7 +400,7 @@ function eHeightCrossCheck() {
 function answerProvenance(answer) {
   const fits = state.fits || [];
   if (!fits.length) return "";
-  const primary = fits.find((f) => f.id === (answer?.fit_ids || [])[0]) || fits[0];
+  const primary = fits.find((f) => f.id === (answer?.fit_ids || [])[0]) || fits[fits.length - 1];
   if (!primary) return "";
   const info = primary.info || {};
   const model = primary.model || "fit";
@@ -488,9 +501,19 @@ function metricNote(p) {
 }
 function fitBlockHtml(fit) {
   try {
-    const rows = Object.entries(fit.params || {}).map(([name, p]) =>
-      `<tr><td>${esc(name)}</td><td class="num">${esc(fmtParam(p))}${metricNote(p)}</td>` +
-      `<td>${esc(p.unit || "")}</td></tr>`).join("");
+    const isCountParam = (name) => name === "n_impacts" || /^n_/.test(name) || /_count$/.test(name);
+    const entries = Object.entries(fit.params || {}).filter(([name, p]) => {
+      // Hide g_px when it duplicates g (same unit and value).
+      if (name === "g_px" && fit.params.g && (fit.params.g.unit || "") === (p.unit || "")) return false;
+      return true;
+    });
+    const rows = entries.map(([name, p]) => {
+      const cell = isCountParam(name) && p && isFinite(p.value)
+        ? String(Math.round(p.value))
+        : `${esc(fmtParam(p))}${metricNote(p)}`;
+      return `<tr><td>${esc(name)}</td><td class="num">${cell}</td>` +
+        `<td>${esc(p.unit || "")}</td></tr>`;
+    }).join("");
     const infoRows = Object.entries(fit.info || {}).map(([k, v]) =>
       `<tr><td>${esc(infoLabel(k))}</td><td class="num">${esc(formatInfoValue(v))}</td><td></td></tr>`).join("");
     const warnings = (fit.warnings || []).map((w) => `<span class="warn-chip">${esc(w)}</span>`).join("");
@@ -508,8 +531,7 @@ function renderFits() {
   wrap.hidden = false;
   const box = $("fits");
   box.innerHTML = "";
-  const primaryId = state.result?.answer?.fit_ids?.[0];
-  const primary = state.fits.find((f) => f.id === primaryId) || state.fits[0];
+  const primary = primaryFit();
   const others = state.fits.filter((f) => f !== primary);
   const block = document.createElement("div");
   block.className = "fit-block";
@@ -518,8 +540,14 @@ function renderFits() {
   if (others.length) {
     const det = document.createElement("details");
     det.className = "fit-block";
+    det.open = Boolean(state.otherFitsExpanded);
     det.innerHTML = `<summary>Other fits (${others.length})</summary>` +
       others.map((f) => fitBlockHtml(f)).join("");
+    det.addEventListener("toggle", () => {
+      state.otherFitsExpanded = det.open;
+      drawOverlay();
+      renderCharts();
+    });
     box.appendChild(det);
   }
 }
@@ -568,7 +596,7 @@ function renderLegend() {
       chip.dataset.trackId = track.id;
       chip.setAttribute("aria-pressed", on ? "true" : "false");
       chip.title = on ? "Hide auxiliary track" : "Show auxiliary track";
-      chip.innerHTML = `<span class="legend-dot" style="background:${esc(color)}"></span>${esc(track.label || track.id)}`;
+      chip.innerHTML = `<span class="legend-dot" style="background:${esc(color)}"></span>${esc(track.label || track.id)}${track.aliases?.length ? ` <span class="legend-alias">(aka ${esc(track.aliases.join(", "))})</span>` : ""}`;
       chip.addEventListener("click", () => {
         if (state.auxTracksVisible.has(track.id)) state.auxTracksVisible.delete(track.id);
         else state.auxTracksVisible.add(track.id);
@@ -582,7 +610,7 @@ function renderLegend() {
     }
     const item = document.createElement("span");
     item.className = "legend-item";
-    item.innerHTML = `<span class="legend-dot" style="background:${esc(color)}"></span>${esc(track.label || track.id)}`;
+    item.innerHTML = `<span class="legend-dot" style="background:${esc(color)}"></span>${esc(track.label || track.id)}${track.aliases?.length ? ` <span class="legend-alias">(aka ${esc(track.aliases.join(", "))})</span>` : ""}`;
     box.appendChild(item);
     i++;
   }
@@ -611,21 +639,22 @@ function trackPosAt(track, t, axis) {
 }
 
 function restitutionBars() {
+  // Bars only for the primary fit's valid impacts, short "#n" labels.
+  const fit = primaryFit();
+  if (!fit) return [];
   const bars = [];
-  for (const fit of state.fits) {
-    if (fit.impacts && fit.impacts.length) {
-      for (const im of fit.impacts) {
-        if (im.e != null && isFinite(im.e)) {
-          bars.push({ label: `impact ${im.index ?? bars.length + 1}`, value: im.e,
-            stderr: im.e_stderr || 0, t: im.t, color: "#f5b544" });
-        }
-      }
+  for (const im of (fit.impacts || [])) {
+    if (isInvalidImpact(im)) continue;
+    if (im.e != null && isFinite(im.e)) {
+      bars.push({ label: `#${bars.length + 1}`, value: im.e,
+        stderr: im.e_stderr || 0, t: im.t, color: "#f5b544",
+        eHeight: (im.e_height != null && isFinite(im.e_height)) ? im.e_height : null });
     }
-    const e = fit.params && fit.params.e;
-    if (!bars.length && e && isFinite(e.value)) {
-      bars.push({ label: "impact 1", value: e.value, stderr: e.stderr || 0,
-        t: (fit.t_range || [0])[0], color: "#f5b544" });
-    }
+  }
+  const e = fit.params && fit.params.e;
+  if (!bars.length && e && isFinite(e.value) && e.value <= 1.05) {
+    bars.push({ label: "#1", value: e.value, stderr: e.stderr || 0,
+      t: (fit.t_range || [0])[0], color: "#f5b544", eHeight: null });
   }
   return bars;
 }
@@ -690,36 +719,40 @@ function renderCharts(cursorT = null) {
     }
     heightUnit = hUnit;
     heightOf.set(track.id, { fromPx, perFrame });
+    // Primary-fit tracks at full opacity; other visible tracks at 25%.
+    const opacity = isFitTrack(track) ? 1 : 0.25;
     const markers = [];
-    for (const fit of state.fits) {
-      if (fit.track_id !== track.id) continue;
-      for (const im of (fit.impacts || [])) {
+    const pFit = primaryFit();
+    if (pFit && pFit.track_id === track.id) {
+      for (const im of (pFit.impacts || [])) {
         if (im.y != null) markers.push({ x: im.t, y: fromPx(im.y) });
       }
     }
-    ySeries.push({ x: track.t, y: heights, color, points: true, markers });
+    ySeries.push({ x: track.t, y: heights, color, points: true, markers, opacity });
     if (perFrame) {
-      xSeries.push({ x: track.t, y: track.X_m.slice(), color, points: true });
+      xSeries.push({ x: track.t, y: track.X_m.slice(), color, points: true, opacity });
       const mTrack = { t: track.t, x: track.X_m, y: track.Y_m };
-      speedSeriesAll.push({ x: track.t, y: speedSeries(mTrack), color, width: 1.6 });
+      speedSeriesAll.push({ x: track.t, y: speedSeries(mTrack), color, width: 1.6, opacity });
     } else {
-      xSeries.push({ x: track.t, y: track.x.map(conv), color, points: true });
-      speedSeriesAll.push({ x: track.t, y: speedSeries(track).map(conv), color, width: 1.6 });
+      xSeries.push({ x: track.t, y: track.x.map(conv), color, points: true, opacity });
+      speedSeriesAll.push({ x: track.t, y: speedSeries(track).map(conv), color, width: 1.6, opacity });
     }
     // Residuals in height space: data height - fit height (sign flips vs y).
-    const fit = state.fits.find((f) => f.track_id === track.id && f.curve);
+    const fit = (pFit && pFit.track_id === track.id && pFit.curve) ? pFit : null;
     if (fit) {
       residSeries.push({
         x: track.t,
         y: track.t.map((tt, i) => heights[i] - curveHeightAt(fit, tt, track, fromPx)),
-        color,
+        color, opacity,
       });
     }
   }
   for (const fit of state.fits) {
     try {
       const track = state.tracks.get(fit.track_id);
-      if (!track) continue;
+      if (!track || !isTrackVisible(track) || !heightOf.has(fit.track_id)) continue;
+      const isPrimary = fit === primaryFit();
+      if (!isPrimary && !state.otherFitsExpanded) continue;
       const color = trackColor(track, [...state.tracks.keys()].indexOf(fit.track_id));
       const { fromPx } = heightOf.get(fit.track_id);
       const curves = (fit.segments && fit.segments.length)
@@ -728,7 +761,7 @@ function renderCharts(cursorT = null) {
       for (const c of curves) {
         if (!c || !c.t) continue;
         const cy = curveHeights(c, track, fromPx);
-        if (cy) ySeries.push({ x: c.t, y: cy, color, dashed: true, width: 1.4 });
+        if (cy) ySeries.push({ x: c.t, y: cy, color, dashed: true, width: 1.4, opacity: isPrimary ? 1 : 0.35 });
       }
     } catch { /* one bad fit must not blank the charts */ }
   }
@@ -847,11 +880,20 @@ function drawOverlay() {
 
     if (showFit) {
       ctx.save();
-      ctx.strokeStyle = color; ctx.globalAlpha = 0.85; ctx.lineWidth = 1.6;
+      ctx.strokeStyle = color; ctx.lineWidth = 1.6;
       ctx.setLineDash([7, 6]);
+      const pFit = primaryFit();
       for (const fit of state.fits) {
         try {
         if (fit.track_id !== track.id) continue;
+        const isPrimary = fit === pFit;
+        // Ghost curves: primary only by default; other fits at 35%
+        // opacity when "Other fits" is expanded in the params panel.
+        if (!isPrimary && !state.otherFitsExpanded) continue;
+        ctx.save();
+        ctx.globalAlpha = isPrimary ? 0.85 : 0.35;
+        ctx.strokeStyle = color;
+        ctx.setLineDash([7, 6]);
         const curves = (fit.segments && fit.segments.length)
           ? fit.segments.map((s) => s.curve).filter(Boolean)
           : (fit.curve ? [fit.curve] : []);
@@ -868,17 +910,28 @@ function drawOverlay() {
           });
           ctx.stroke();
         }
-        // impact markers
+        ctx.restore();
+        // Impact markers + e labels only for the primary fit.
+        if (!isPrimary) continue;
         for (const im of (fit.impacts || [])) {
           if (im.x == null || im.y == null) continue;
           const px = PX(im.x), py = PY(im.y);
+          ctx.save();
           ctx.setLineDash([]);
+          if (isInvalidImpact(im)) {
+            // Invalid: small grey hollow circle, never an e label.
+            ctx.strokeStyle = "#9aa5b1"; ctx.globalAlpha = 0.9; ctx.lineWidth = 1.4;
+            ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2); ctx.stroke();
+            ctx.restore();
+            continue;
+          }
+          ctx.strokeStyle = color; ctx.globalAlpha = 0.85;
           ctx.beginPath(); ctx.moveTo(px - 8, py - 8); ctx.lineTo(px + 8, py + 8);
           ctx.moveTo(px + 8, py - 8); ctx.lineTo(px - 8, py + 8); ctx.stroke();
-          ctx.setLineDash([7, 6]);
           ctx.fillStyle = color;
           ctx.font = "11px ui-monospace, monospace";
           ctx.fillText(`impact ${im.index ?? ""}${im.e != null ? `  e=${Number(im.e).toFixed(2)}` : ""}`, px + 11, py - 8);
+          ctx.restore();
         }
         } catch { /* one bad fit must not blank the overlay */ }
       }
@@ -997,6 +1050,7 @@ function startSync() {
 function resetJob() {
   state.tracks.clear();
   state.auxTracksVisible.clear();
+  state.otherFitsExpanded = false;
   state.fits = [];
   state.result = emptyResult();
   state.strobeUrl = null;

@@ -113,6 +113,54 @@ def test_stitch_border_exit_reentry_top():
     assert len(out) == 1, [t.summary() for t in out]
 
 
+def _labelled(track_id, label, frames, xs, ys, conf=0.9, fps=30.0, diam=40.0):
+    tr = _synth_track(track_id, frames, xs, ys, fps, diam=diam)
+    tr.label = label
+    tr.conf[:] = conf
+    return tr
+
+
+def test_cross_prompt_duplicates_merged_with_aliases_and_gap_fill():
+    from physicam.sam import deduplicate_tracks
+
+    fps = 30.0
+    frames = list(range(20))
+    xs = [100 + 2 * i for i in frames]
+    kept = _labelled("t0", "red ball", [f for f in frames if f != 10], [x for f, x in zip(frames, xs) if f != 10], [200] * 19, conf=0.9, fps=fps)
+    orange = _labelled("t1", "orange ball", [f for f in frames if f != 5], [x + 1 for f, x in zip(frames, xs) if f != 5], [201] * 19, conf=0.8, fps=fps)
+    small = _labelled("t2", "small ball", frames[:15], xs[:15], [200] * 15, conf=0.95, fps=fps)
+    out = deduplicate_tracks([kept, orange, small])
+    assert len(out) == 1
+    # tie on frames (19): higher median confidence wins (red, 0.9 > 0.8)
+    assert out[0].label == "red ball"
+    assert set(out[0].aliases) == {"orange ball", "small ball"}
+    assert out[0].n == 20  # frame 10 filled from the dropped orange track
+    assert int(out[0].frames[10]) == 10
+
+
+def test_cross_prompt_gap_fill_rejects_inconsistent_frame():
+    from physicam.sam import deduplicate_tracks
+
+    fps = 30.0
+    a = _labelled("t0", "red ball", list(range(20)), [100 + i for i in range(20)], [200] * 20, conf=0.9, fps=fps)
+    b_frames = list(range(19)) + [25]
+    b = _labelled("t1", "orange ball", b_frames, [100 + i for i in range(19)] + [900], [200] * 19 + [600], conf=0.8, fps=fps)
+    out = deduplicate_tracks([a, b])
+    assert len(out) == 1
+    assert 25 not in [int(f) for f in out[0].frames]
+
+
+def test_cross_prompt_keeps_genuinely_different_close_objects():
+    from physicam.sam import deduplicate_tracks
+
+    fps = 30.0
+    a = _labelled("t0", "red ball", list(range(20)), [100] * 20, [200] * 20, fps=fps)
+    b = _labelled("t1", "blue ball", list(range(20)), [145] * 20, [200] * 20, fps=fps)
+    out = deduplicate_tracks([a, b])
+    assert len(out) == 2
+    assert all(not t.aliases for t in out)
+
+
 def test_stitch_drops_duplicates():
     fps = 30.0
     a = _synth_track("t0", list(range(0, 20)), [100 + i for i in range(20)], [200] * 20, fps)

@@ -76,6 +76,7 @@ class Track:
     eq_diameter: np.ndarray  # px, sqrt(4*area/pi)
     contours: dict[int, str] = field(default_factory=dict)
     fps: float = 30.0
+    aliases: list[str] = field(default_factory=list)
 
     @property
     def n(self) -> int:
@@ -94,6 +95,7 @@ class Track:
             "conf": [round(float(v), 4) for v in self.conf],
             "eq_diameter": [round(float(v), 3) for v in self.eq_diameter],
             "fps": self.fps,
+            "aliases": list(self.aliases),
             "contours": {str(k): v for k, v in sorted(self.contours.items())},
         }
 
@@ -110,6 +112,7 @@ class Track:
             eq_diameter=np.asarray(d["eq_diameter"], dtype=float),
             contours={int(k): v for k, v in (d.get("contours") or {}).items()},
             fps=float(d.get("fps", 30.0)),
+            aliases=[str(a) for a in (d.get("aliases") or [])],
         )
 
     def summary(self) -> dict:
@@ -132,6 +135,7 @@ class Track:
             "x_extent_px": [round(float(self.x.min()), 1), round(float(self.x.max()), 1)],
             "y_extent_px": [round(float(self.y.min()), 1), round(float(self.y.max()), 1)],
             "mean_conf": round(float(np.mean(self.conf)), 3),
+            "aliases": list(self.aliases),
             "gaps": gaps[:20],
         }
 
@@ -266,6 +270,112 @@ def _drop_duplicates(tracks: list[Track]) -> list[Track]:
     return [t for t, k in zip(tracks, keep) if k]
 
 
+def _median_conf(track: Track) -> float:
+    return float(np.median(track.conf)) if track.n and len(track.conf) else 0.0
+
+
+def _same_object(a: Track, b: Track) -> bool:
+    """True when *a* and *b* are the same physical object (spec §1).
+
+    Requires overlap on >= 60% of the shorter track, then either median
+    box IoU >= 0.5 or median centroid distance < 0.5 x median eq. diameter.
+    """
+    if a.n == 0 or b.n == 0:
+        return False
+    fa = {int(f): k for k, f in enumerate(a.frames)}
+    fb = {int(f): k for k, f in enumerate(b.frames)}
+    common = sorted(set(fa) & set(fb))
+    if not common or len(common) / max(1, min(a.n, b.n)) < 0.6:
+        return False
+    ious = [_box_iou(a.bbox[fa[f]], b.bbox[fb[f]]) for f in common]
+    if float(np.median(ious)) >= 0.5:
+        return True
+    dists = [math.hypot(float(a.x[fa[f]] - b.x[fb[f]]), float(a.y[fa[f]] - b.y[fb[f]])) for f in common]
+    diams = [float(a.eq_diameter[fa[f]]) for f in common] + [float(b.eq_diameter[fb[f]]) for f in common]
+    med_diam = float(np.median(diams)) if diams else 0.0
+    return med_diam > 0 and float(np.median(dists)) < 0.5 * med_diam
+
+
+def _merge_cross_prompt(kept: Track, dropped: Track) -> Track:
+    """Keep *kept*, record *dropped*'s label as an alias, fill consistent gaps."""
+    aliases: list[str] = []
+    for name in list(kept.aliases) + [dropped.label] + list(dropped.aliases):
+        if name and name != kept.label and name not in aliases:
+            aliases.append(str(name))
+    kept_frames = {int(f) for f in kept.frames}
+    diam = float(np.median(kept.eq_diameter)) if kept.n else 0.0
+    if diam <= 0 and dropped.n:
+        diam = float(np.median(dropped.eq_diameter))
+    rows: list[tuple] = []
+    for k in range(kept.n):
+        rows.append((int(kept.frames[k]), float(kept.t[k]), float(kept.x[k]), float(kept.y[k]),
+                     float(kept.area[k]), kept.bbox[k], float(kept.conf[k]), float(kept.eq_diameter[k])))
+    contours = dict(kept.contours)
+    for k in range(dropped.n):
+        frame = int(dropped.frames[k])
+        if frame in kept_frames:
+            continue
+        if kept.n >= 2:
+            ix = float(np.interp(float(dropped.t[k]), kept.t, kept.x))
+            iy = float(np.interp(float(dropped.t[k]), kept.t, kept.y))
+        elif kept.n == 1:
+            ix, iy = float(kept.x[0]), float(kept.y[0])
+        else:
+            continue
+        if diam > 0 and math.hypot(float(dropped.x[k]) - ix, float(dropped.y[k]) - iy) >= 1.0 * diam:
+            continue
+        rows.append((frame, float(dropped.t[k]), float(dropped.x[k]), float(dropped.y[k]),
+                     float(dropped.area[k]), dropped.bbox[k], float(dropped.conf[k]),
+                     float(dropped.eq_diameter[k])))
+        if frame in dropped.contours:
+            contours[frame] = dropped.contours[frame]
+    rows.sort(key=lambda r: r[0])
+    return Track(
+        id=kept.id, label=kept.label,
+        frames=np.array([r[0] for r in rows], dtype=int),
+        t=np.array([r[1] for r in rows], dtype=float),
+        x=np.array([r[2] for r in rows], dtype=float),
+        y=np.array([r[3] for r in rows], dtype=float),
+        area=np.array([r[4] for r in rows], dtype=float),
+        bbox=np.array([r[5] for r in rows], dtype=float).reshape(-1, 4) if rows else np.zeros((0, 4)),
+        conf=np.array([r[6] for r in rows], dtype=float),
+        eq_diameter=np.array([r[7] for r in rows], dtype=float),
+        contours=contours, fps=kept.fps, aliases=aliases,
+    )
+
+
+def deduplicate_tracks(tracks: list[Track]) -> list[Track]:
+    """Deduplicate tracks across prompts (same physical object, many labels).
+
+    Two tracks are the same object when, over overlapping frames (>= 60%
+    of the shorter track), median box IoU >= 0.5 or median centroid
+    distance < 0.5 x median equivalent diameter. The track with more
+    frames is kept (tie-break: higher median confidence); dropped labels
+    are kept in ``aliases`` and consistent dropped-only frames fill gaps.
+    """
+    work = list(tracks)
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(work)):
+            if changed:
+                break
+            for j in range(i + 1, len(work)):
+                a, b = work[i], work[j]
+                if not _same_object(a, b):
+                    continue
+                if (b.n, _median_conf(b)) > (a.n, _median_conf(a)):
+                    kept, dropped, ki = b, a, j
+                else:
+                    kept, dropped, ki = a, b, i
+                merged = _merge_cross_prompt(kept, dropped)
+                work = [t for k, t in enumerate(work) if k not in (i, j)]
+                work.insert(min(ki, len(work)), merged)
+                changed = True
+                break
+    return work
+
+
 def _predict(track: Track, t_query: float) -> tuple[float, float]:
     """Extrapolate (x, y) at *t_query* with constant-acceleration fit on last points.
 
@@ -307,6 +417,7 @@ def _merge_pair(a: Track, b: Track) -> Track:
         conf=np.concatenate([a.conf, b.conf])[order],
         eq_diameter=np.concatenate([a.eq_diameter, b.eq_diameter])[order],
         contours=contours, fps=a.fps,
+        aliases=list(dict.fromkeys(list(a.aliases) + list(b.aliases))),
     )
 
 

@@ -84,6 +84,8 @@ export function drawLineChart(canvas, cfg, cursorT) {
     ctx.globalAlpha = 1;
   }
   for (const ser of cfg.series) {
+    ctx.save();
+    ctx.globalAlpha = ser.opacity != null ? ser.opacity : 1;
     ctx.strokeStyle = ser.color; ctx.fillStyle = ser.color; ctx.lineWidth = ser.width || 1.6;
     ctx.setLineDash(ser.dashed ? [6, 5] : []);
     ctx.beginPath();
@@ -116,6 +118,7 @@ export function drawLineChart(canvas, cfg, cursorT) {
         ctx.stroke();
       }
     }
+    ctx.restore();
   }
   if (cursorT != null && isFinite(cursorT) && cursorT >= xr[0] && cursorT <= xr[1]) {
     ctx.strokeStyle = th.accent; ctx.lineWidth = 1.4;
@@ -124,7 +127,9 @@ export function drawLineChart(canvas, cfg, cursorT) {
   canvas._geom = { xr, yr, pad: PAD, cfg };
 }
 
-/** Bar chart with error bars. bars: [{label, value, stderr, color}]. */
+/** Bar chart with error bars. bars: [{label, value, stderr, color, eHeight?}].
+ *  When eHeight is present, a hollow diamond marks the apex-height
+ *  cross-check for that impact. */
 export function drawBarChart(canvas, bars) {
   const s = setup(canvas);
   if (!s) return;
@@ -135,7 +140,7 @@ export function drawBarChart(canvas, bars) {
     ctx.fillText("No impacts", w / 2, h / 2);
     return;
   }
-  const tops = bars.map((b) => b.value + (b.stderr || 0));
+  const tops = bars.flatMap((b) => [b.value + (b.stderr || 0), ...(b.eHeight != null && isFinite(b.eHeight) ? [b.eHeight] : [])]);
   const yr = [0, Math.max(1.15, ...tops) * 1.12];
   const xr = [0, bars.length];
   // Categorical x axis: no numeric x ticks (they overlap); labels are drawn
@@ -167,6 +172,16 @@ export function drawBarChart(canvas, bars) {
     ctx.moveTo(cx - 7, eTop); ctx.lineTo(cx + 7, eTop);
     ctx.moveTo(cx - 7, eBot); ctx.lineTo(cx + 7, eBot);
     ctx.stroke();
+    // Apex-height cross-check: hollow diamond (no fill) when present.
+    if (b.eHeight != null && isFinite(b.eHeight)) {
+      const dy = Y(Math.min(b.eHeight, yr[1]));
+      ctx.save();
+      ctx.strokeStyle = b.color; ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(cx, dy - 6); ctx.lineTo(cx + 6, dy); ctx.lineTo(cx, dy + 6); ctx.lineTo(cx - 6, dy);
+      ctx.closePath(); ctx.stroke();
+      ctx.restore();
+    }
     // value above the error-bar cap, categorical label below the axis
     ctx.fillStyle = th.text; ctx.font = "11px ui-monospace, monospace"; ctx.textAlign = "center";
     ctx.fillText(b.value.toFixed(2), cx, Math.max(PAD.t + 10, eTop - 6));
