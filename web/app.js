@@ -20,6 +20,9 @@ const state = {
   eventSource: null,
   runningRow: null,
   mockTimers: [],
+  strobeUrl: null,
+  stageMode: "video",   // "video" | "strobe"
+  currentStage: null,
 };
 
 function emptyResult() {
@@ -87,6 +90,7 @@ function showError(msg) {
   div.className = "error-box";
   div.textContent = msg;
   tl.appendChild(div);
+  scrollTimeline();
 }
 
 /* ---------------- timeline ---------------- */
@@ -116,15 +120,22 @@ function traceMeta(trace) {
   return { icon: "plan", badge: kind === "report" ? "WONDER" : "SPARK" };
 }
 
+function scrollTimeline() {
+  const tl = $("timeline");
+  // Auto-scroll to the newest row (after layout, so scrollHeight is final).
+  requestAnimationFrame(() => { tl.scrollTop = tl.scrollHeight; });
+  tl.scrollTop = tl.scrollHeight;
+}
+
 function addStageHead(text) {
   const tl = $("timeline");
   tl.querySelector(".timeline-empty")?.remove();
-  clearRunning();
   const div = document.createElement("div");
   div.className = "stage-head";
   div.textContent = text;
-  tl.appendChild(div);
-  tl.scrollTop = tl.scrollHeight;
+  // Keep the running spinner row pinned below the newest content.
+  if (state.runningRow) tl.insertBefore(div, state.runningRow); else tl.appendChild(div);
+  scrollTimeline();
 }
 
 function clearRunning() {
@@ -132,19 +143,25 @@ function clearRunning() {
 }
 
 function showRunning(label) {
-  clearRunning();
   const tl = $("timeline");
   tl.querySelector(".timeline-empty")?.remove();
+  if (state.runningRow) {
+    // Keep the same spinner row until the next event; only refresh its label.
+    const labelEl = state.runningRow.querySelector(".tsummary");
+    if (labelEl && label) labelEl.textContent = label;
+    tl.appendChild(state.runningRow);
+    scrollTimeline();
+    return;
+  }
   const row = document.createElement("div");
-  row.className = "trow";
+  row.className = "trow running-row";
   row.innerHTML = `<div class="trow-top"><span class="spinner"></span><span class="tsummary">${esc(label)}</span></div>`;
   tl.appendChild(row);
   state.runningRow = row;
-  tl.scrollTop = tl.scrollHeight;
+  scrollTimeline();
 }
 
 function addTraceRow(trace) {
-  clearRunning();
   const tl = $("timeline");
   tl.querySelector(".timeline-empty")?.remove();
   const meta = traceMeta(trace);
@@ -158,11 +175,103 @@ function addTraceRow(trace) {
     `<span class="tsummary">${esc(trace.summary || trace.name || "")}</span>` +
     `<span class="tms">${esc(ms)}</span></div>` +
     `<details><summary>${esc(trace.name || trace.kind || "step")} details</summary><pre>${esc(detail)}</pre></details>`;
-  tl.appendChild(row);
-  tl.scrollTop = tl.scrollHeight;
+  // Insert above the running spinner row so the spinner stays last/alive
+  // until the next event (done/error/stage replaces it).
+  if (state.runningRow) tl.insertBefore(row, state.runningRow); else tl.appendChild(row);
+  scrollTimeline();
+}
+
+/* ---------------- stage progress + strobe ---------------- */
+
+const STAGE_LABELS = {
+  ingest: "Preparing video…",
+  plan: "Muse Spark is watching the video…",
+  agent: "Agent at work · SAM 3.1 tracking…",
+  report: "Muse Wonder is writing the report…",
+};
+
+function stageKeyFrom(value) {
+  const s = String(value || "").toLowerCase();
+  if (s.includes("ingest") || s.includes("prepar")) return "ingest";
+  if (s.includes("plan") || s.includes("watch")) return "plan";
+  if (s.includes("agent") || s.includes("track") || s.includes("sam")) return "agent";
+  if (s.includes("report") || s.includes("wonder")) return "report";
+  return null;
+}
+
+let stageFadeTimer = null;
+function setStageProgress(key, detail) {
+  if (!key) return;
+  if (stageFadeTimer) { clearTimeout(stageFadeTimer); stageFadeTimer = null; }
+  state.currentStage = key;
+  const pill = $("stage-progress");
+  pill.classList.remove("fading");
+  pill.hidden = false;
+  $("stage-progress-text").textContent = detail || STAGE_LABELS[key];
+}
+
+function updateStageProgressFromTrace(trace) {
+  if (state.currentStage !== "agent") return;
+  const summary = trace?.summary || trace?.name;
+  if (summary) setStageProgress("agent", `Agent at work · ${summary}`);
+}
+
+function hideStageProgress() {
+  state.currentStage = null;
+  const pill = $("stage-progress");
+  if (pill.hidden) return;
+  pill.classList.add("fading");
+  stageFadeTimer = setTimeout(() => { pill.hidden = true; pill.classList.remove("fading"); stageFadeTimer = null; }, 450);
+}
+
+function setStageMode(mode) {
+  state.stageMode = mode === "strobe" && state.strobeUrl ? "strobe" : "video";
+  const isStrobe = state.stageMode === "strobe";
+  $("strobe-img").hidden = !isStrobe;
+  $("video").hidden = isStrobe;
+  $("overlay").hidden = isStrobe;
+  if (isStrobe) $("hud").hidden = true;
+  for (const btn of $("stage-mode").querySelectorAll("button")) {
+    btn.classList.toggle("active", btn.dataset.mode === state.stageMode);
+  }
+  if (!isStrobe) drawOverlay();
+}
+
+function setStrobe(url) {
+  if (!url) return;
+  state.strobeUrl = url;
+  state.result.strobe_url = url;
+  $("strobe-img").src = url;
+  $("stage-mode").hidden = false;
+  const fig = $("report-strobe");
+  $("report-strobe-img").src = url;
+  // The report figure only shows once a report section exists.
+  fig.hidden = $("report-wrap").hidden;
+  setStageMode(state.stageMode);
+}
+
+function renderReportStrobe() {
+  const has = Boolean(state.strobeUrl);
+  $("report-strobe").hidden = !has;
+  if (has) $("report-strobe-img").src = state.strobeUrl;
 }
 
 /* ---------------- results rendering ---------------- */
+
+function isDimensionless(unit) {
+  const u = String(unit || "").trim();
+  return u === "" || u === "1" || u === "-" || u.toLowerCase() === "dimensionless";
+}
+
+function eHeightCrossCheck() {
+  for (const fit of state.fits) {
+    const raw = fit.e_height ?? fit.params?.e_height ?? fit.params?.eHeight;
+    if (raw == null) continue;
+    if (typeof raw === "number" && isFinite(raw)) return { value: raw, stderr: null };
+    if (typeof raw === "object" && isFinite(raw.value)) return { value: raw.value, stderr: raw.stderr ?? null };
+  }
+  return null;
+}
 
 function renderAnswer(answer, animate = true) {
   if (!answer) return;
@@ -170,8 +279,10 @@ function renderAnswer(answer, animate = true) {
   card.hidden = false;
   const value = $("answer-value");
   const showValue = answer.value != null && isFinite(answer.value);
+  const dimensionless = isDimensionless(answer.unit);
+  const unitHtml = dimensionless ? "" : ` <span class="unit">${esc(answer.unit || "")}</span>`;
   value.innerHTML = showValue
-    ? `${fmt(answer.value, 4)} <span class="plusminus">± ${fmt(answer.uncertainty, 3)}</span> <span class="unit">${esc(answer.unit || "")}</span>`
+    ? `${fmt(answer.value, 4)} <span class="plusminus">± ${fmt(answer.uncertainty, 3)}</span>${unitHtml}`
     : esc(answer.headline || "");
   if (animate) {
     value.classList.remove("count-up");
@@ -182,23 +293,31 @@ function renderAnswer(answer, animate = true) {
   $("answer-headline").textContent = showValue ? (answer.headline || "") : "";
   $("answer-summary").textContent = answer.summary || "";
   const delta = $("answer-delta");
-  const unit = (answer.unit || "").replace("²", "^2");
-  if (showValue && (unit === "m/s^2" || unit === "m/s²") && Math.abs(answer.value) > 1) {
+  const unit = String(answer.unit || "").trim().replace("²", "^2");
+  if (showValue && unit === "m/s^2") {
+    // Gravity only: Δ vs 9.81 m/s².
     const pct = (answer.value - 9.81) / 9.81 * 100;
     const sigma = answer.uncertainty ? Math.abs(answer.value - 9.81) / answer.uncertainty : NaN;
     delta.textContent = `Δ vs 9.81 m/s²: ${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%` +
       (isFinite(sigma) ? ` (${sigma.toFixed(1)}σ)` : "");
+  } else if (showValue && dimensionless) {
+    const cross = eHeightCrossCheck();
+    delta.textContent = cross
+      ? `cross-check (apex heights): e = ${fmt(cross.value, 3)}${cross.stderr != null ? ` ± ${fmt(cross.stderr, 3)}` : ""}`
+      : "";
   } else delta.textContent = "";
 }
 
 function countUp(el, answer) {
   const target = answer.value, unc = answer.uncertainty || 0, unit = answer.unit || "";
+  const unitHtml = isDimensionless(unit) ? "" : ` <span class="unit">${esc(unit)}</span>`;
   const t0 = performance.now(), dur = 700;
   const tick = (now) => {
     const k = Math.min(1, (now - t0) / dur);
     const eased = 1 - Math.pow(1 - k, 3);
-    el.innerHTML = `${fmt(target * eased, 4)} <span class="plusminus">± ${fmt(unc * eased, 3)}</span> <span class="unit">${esc(unit)}</span>`;
+    el.innerHTML = `${fmt(target * eased, 4)} <span class="plusminus">± ${fmt(unc * eased, 3)}</span>${unitHtml}`;
     if (k < 1) requestAnimationFrame(tick);
+    else if (state.result.answer) renderAnswer(state.result.answer, false);
   };
   requestAnimationFrame(tick);
 }
@@ -228,6 +347,7 @@ function renderFits() {
 function renderReport(md) {
   if (!md) return;
   $("report-wrap").hidden = false;
+  renderReportStrobe();
   $("report").innerHTML = renderMarkdown(md);
 }
 
@@ -287,6 +407,27 @@ function restitutionBars() {
   return bars;
 }
 
+/** Per-frame calibrated tracks plot X_m/Y_m (Y up) directly. */
+function isPerFrame(track) {
+  return state.result?.calibration?.kind === "per_frame"
+    && Array.isArray(track.Y_m) && Array.isArray(track.X_m);
+}
+
+/** Affine Y_m = a*y_px + b fitted from a per-frame track (a < 0: Y is up). */
+function perFrameAffine(track) {
+  const ys = track.y || [], ms = track.Y_m || [];
+  const n = Math.min(ys.length, ms.length);
+  if (n < 2) return null;
+  let sx = 0, sy = 0;
+  for (let i = 0; i < n; i++) { sx += ys[i]; sy += ms[i]; }
+  const mx = sx / n, my = sy / n;
+  let num = 0, den = 0;
+  for (let i = 0; i < n; i++) { num += (ys[i] - mx) * (ms[i] - my); den += (ys[i] - mx) ** 2; }
+  if (!den) return null;
+  const a = num / den;
+  return { a, b: my - a * mx };
+}
+
 function renderCharts(cursorT = null) {
   const wrap = $("charts-wrap");
   if (!state.tracks.size) { wrap.hidden = true; return; }
@@ -296,43 +437,105 @@ function renderCharts(cursorT = null) {
   const unit = cal ? "m" : "px";
   const conv = (v) => (cal ? v * cal.m_per_px : v);
 
-  // y chart: data + fit curve(s) + impact markers on the data series
+  // Height chart: h = (y_ref - y) with y_ref the largest (lowest) tracked y,
+  // so height is positive-up. Labels/units follow the calibration.
   const ySeries = [], xSeries = [], speedSeriesAll = [], residSeries = [];
+  let heightUnit = unit, anyPerFrame = false;
+  const heightOf = new Map(); // track.id -> {data, fromPx, label unit}
   let idx = 0;
   for (const track of state.tracks.values()) {
     const color = trackColor(track, idx++);
+    const perFrame = isPerFrame(track);
+    if (perFrame) anyPerFrame = true;
+    const finiteY = (track.y || []).filter(isFinite);
+    const yRef = finiteY.length ? Math.max(...finiteY) : 0;
+    let heights, fromPx, hUnit;
+    if (perFrame) {
+      heights = track.Y_m.slice();
+      const aff = perFrameAffine(track);
+      fromPx = aff ? (yPx) => aff.a * yPx + aff.b : () => NaN;
+      hUnit = "m";
+    } else if (cal) {
+      heights = track.y.map((y) => (yRef - y) * cal.m_per_px);
+      fromPx = (yPx) => (yRef - yPx) * cal.m_per_px;
+      hUnit = "m";
+    } else {
+      heights = track.y.map((y) => yRef - y);
+      fromPx = (yPx) => yRef - yPx;
+      hUnit = "px";
+    }
+    heightUnit = hUnit;
+    heightOf.set(track.id, { fromPx, perFrame });
     const markers = [];
     for (const fit of state.fits) {
       if (fit.track_id !== track.id) continue;
-      for (const im of (fit.impacts || [])) markers.push({ x: im.t, y: conv(im.y) });
+      for (const im of (fit.impacts || [])) {
+        if (im.y != null) markers.push({ x: im.t, y: fromPx(im.y) });
+      }
     }
-    ySeries.push({ x: track.t, y: track.y.map(conv), color, points: true, markers });
-    xSeries.push({ x: track.t, y: track.x.map(conv), color, points: true });
-    speedSeriesAll.push({ x: track.t, y: speedSeries(track).map(conv), color, width: 1.6 });
-    // residuals vs the first fit for this track
+    ySeries.push({ x: track.t, y: heights, color, points: true, markers });
+    if (perFrame) {
+      xSeries.push({ x: track.t, y: track.X_m.slice(), color, points: true });
+      const mTrack = { t: track.t, x: track.X_m, y: track.Y_m };
+      speedSeriesAll.push({ x: track.t, y: speedSeries(mTrack), color, width: 1.6 });
+    } else {
+      xSeries.push({ x: track.t, y: track.x.map(conv), color, points: true });
+      speedSeriesAll.push({ x: track.t, y: speedSeries(track).map(conv), color, width: 1.6 });
+    }
+    // Residuals in height space: data height - fit height (sign flips vs y).
     const fit = state.fits.find((f) => f.track_id === track.id && f.curve);
     if (fit) {
-      residSeries.push({ x: track.t, y: track.t.map((tt, i) => track.y[i] - curveAt(fit.curve, tt)), color });
+      residSeries.push({
+        x: track.t,
+        y: track.t.map((tt, i) => heights[i] - curveHeightAt(fit, tt, track, fromPx)),
+        color,
+      });
     }
   }
   for (const fit of state.fits) {
     const track = state.tracks.get(fit.track_id);
-    const color = track ? trackColor(track, [...state.tracks.keys()].indexOf(fit.track_id)) : "#888";
+    if (!track) continue;
+    const color = trackColor(track, [...state.tracks.keys()].indexOf(fit.track_id));
+    const { fromPx } = heightOf.get(fit.track_id);
     const curves = (fit.segments && fit.segments.length)
       ? fit.segments.map((s) => s.curve).filter(Boolean)
       : (fit.curve ? [fit.curve] : []);
     for (const c of curves) {
-      if (c && c.t && c.y) ySeries.push({ x: c.t, y: c.y.map(conv), color, dashed: true, width: 1.4 });
+      if (!c || !c.t) continue;
+      const cy = curveHeights(c, track, fromPx);
+      if (cy) ySeries.push({ x: c.t, y: cy, color, dashed: true, width: 1.4 });
     }
   }
-  drawLineChart($("chart-y"), { series: ySeries, xLabel: "t (s)", yLabel: `y (${unit})` }, t);
-  drawLineChart($("chart-y-resid"), { series: residSeries, xLabel: "t (s)", yLabel: "resid (px)" }, t);
-  drawLineChart($("chart-x"), { series: xSeries, xLabel: "t (s)", yLabel: `x (${unit})` }, t);
-  drawLineChart($("chart-speed"), { series: speedSeriesAll, xLabel: "t (s)", yLabel: `speed (${unit}/s)` }, t);
+  drawLineChart($("chart-y"), { series: ySeries, xLabel: "t (s)", yLabel: `height (${heightUnit})` }, t);
+  drawLineChart($("chart-y-resid"), { series: residSeries, xLabel: "t (s)", yLabel: `resid (${heightUnit})` }, t);
+  drawLineChart($("chart-x"), { series: xSeries, xLabel: "t (s)", yLabel: `x (${anyPerFrame ? "m" : unit})` }, t);
+  drawLineChart($("chart-speed"), { series: speedSeriesAll, xLabel: "t (s)", yLabel: `speed (${anyPerFrame ? "m" : unit}/s)` }, t);
 
   const bars = restitutionBars();
   $("chart-e-box").hidden = !bars.length;
   if (bars.length) drawBarChart($("chart-e"), bars);
+}
+
+/** Fit-curve heights: Y_m/y_m if present, else px y transformed like data. */
+function curveHeights(curve, track, fromPx) {
+  const direct = curve.Y_m || curve.y_m;
+  if (direct && direct.length) return direct.slice();
+  if (curve.y && curve.y.length) return curve.y.map(fromPx);
+  return null;
+}
+
+function curveHeightAt(fit, t, track, fromPx) {
+  const curves = (fit.segments && fit.segments.length)
+    ? fit.segments.map((s) => s.curve).filter(Boolean) : (fit.curve ? [fit.curve] : []);
+  for (const c of curves) {
+    if (!c || !c.t || !c.t.length) continue;
+    if (t < c.t[0] || t > c.t[c.t.length - 1]) continue;
+    const direct = c.Y_m || c.y_m;
+    if (direct) { const saved = c.y; c.y = direct; const v = curveAt(c, t); c.y = saved; return v; }
+    return fromPx(curveAt(c, t));
+  }
+  const v = fit.curve ? curveAt(fit.curve, t) : NaN;
+  return isFinite(v) ? fromPx(v) : NaN;
 }
 
 function renderAll(animateAnswer = false) {
@@ -373,6 +576,7 @@ function nearestContour(track, frame) {
 }
 
 function drawOverlay() {
+  if (state.stageMode === "strobe") return;
   const ctx = overlay.getContext("2d");
   const dpr = window.devicePixelRatio || 1;
   const cw = overlay.clientWidth, ch = overlay.clientHeight;
@@ -528,6 +732,8 @@ function resetJob() {
   state.tracks.clear();
   state.fits = [];
   state.result = emptyResult();
+  state.strobeUrl = null;
+  state.stageMode = "video";
   $("timeline").innerHTML = "";
   $("answer-card").hidden = true;
   $("fits-wrap").hidden = true;
@@ -535,7 +741,21 @@ function resetJob() {
   $("report-wrap").hidden = true;
   $("cost-line").hidden = true;
   $("track-legend").innerHTML = "";
+  $("stage-mode").hidden = true;
+  $("strobe-img").hidden = true;
+  $("report-strobe").hidden = true;
+  $("video").hidden = false;
+  $("overlay").hidden = false;
+  hideStageProgress();
   clearRunning();
+  updateEmptyState();
+}
+
+/** Empty state shows only when no video source is available. */
+function updateEmptyState() {
+  const hasVideo = Boolean(state.result?.video?.url || video.getAttribute("src"));
+  $("empty-state").hidden = hasVideo;
+  if (hasVideo && state.stageMode !== "strobe") { video.hidden = false; overlay.hidden = false; }
 }
 
 function applyTrack(track) {
@@ -554,6 +774,7 @@ function applyFit(fit) {
   state.result.fits = state.fits;
   renderFits();
   renderCharts();
+  if (state.result.answer) renderAnswer(state.result.answer, false);
   drawOverlay();
 }
 
@@ -565,19 +786,28 @@ function applyResult(result, { animateAnswer = false } = {}) {
   for (const tr of (result.tracks || [])) state.tracks.set(tr.id, tr);
   state.fits = result.fits || [];
   if (result.video && result.video.url) setVideoSource(result.video.url);
+  if (result.strobe_url) setStrobe(result.strobe_url);
   if (result.question) $("question").value = result.question;
+  clearRunning();
   $("timeline").innerHTML = "";
   for (const tr of (result.trace || [])) addTraceRow(tr);
   renderAll(animateAnswer);
+  hideStageProgress();
+  updateEmptyState();
 }
 
 function setVideoSource(url) {
   if (!url) return;
-  const absolute = MOCK && !/^(https?:|\/)/.test(url) ? url : url;
-  if (video.getAttribute("src") !== absolute) {
-    video.src = absolute;
-    $("empty-state").hidden = true;
-  }
+  video.preload = "auto";
+  // Size the stage to the video's aspect ratio when the result declares it.
+  const v = state.result?.video;
+  if (v && v.width && v.height) $("stage").style.aspectRatio = `${v.width} / ${v.height}`;
+  if (video.getAttribute("src") !== url) video.src = url;
+  // Hide the empty state and show the video + overlay whenever a job or
+  // example has a video (mock, example, live job and #job= reload all come
+  // through here). The first frame is sought in the loadeddata handler.
+  $("empty-state").hidden = true;
+  if (state.stageMode !== "strobe") { video.hidden = false; overlay.hidden = false; }
 }
 
 async function loadJob(id) {
@@ -592,13 +822,18 @@ function handleEvent(ev) {
   const type = ev.type || "";
   const trace = ev.trace || (type === "trace" ? ev : null);
   if (type === "stage") {
+    const key = stageKeyFrom(ev.stage || ev.name || ev.title || "");
     addStageHead(ev.title || ev.stage || ev.name || "Stage");
-    if (ev.summary) showRunning(ev.summary);
+    if (key) setStageProgress(key);
+    showRunning(ev.summary || (key ? STAGE_LABELS[key] : "Working…"));
     return;
   }
+  if (type === "strobe") { setStrobe(ev.url || ev.strobe_url || ev.strobe?.url); return; }
   if (type === "trace" && trace) {
     // tolerate flat events: {type:"trace", name, summary, ms, args}
-    addTraceRow({ kind: ev.kind, name: ev.name, args: ev.args, summary: ev.summary, ms: ev.ms, step: ev.step, ...trace });
+    const row = { kind: ev.kind, name: ev.name, args: ev.args, summary: ev.summary, ms: ev.ms, step: ev.step, ...trace };
+    addTraceRow(row);
+    updateStageProgressFromTrace(row);
     state.result.trace.push(trace);
     return;
   }
@@ -616,13 +851,15 @@ function handleEvent(ev) {
   }
   if (type === "plan" && ev.plan) { state.result.plan = ev.plan; return; }
   if (type === "calibration" && ev.calibration) { state.result.calibration = ev.calibration; renderCharts(); drawOverlay(); return; }
+  if (ev.strobe_url && type !== "strobe") setStrobe(ev.strobe_url);
   if (type === "done") {
     clearRunning();
+    hideStageProgress();
     setStatus("Done.");
     if (state.jobId && !MOCK) loadJob(state.jobId).catch(() => {});
     return;
   }
-  if (type === "error") { clearRunning(); showError(ev.message || ev.error || "Job failed."); return; }
+  if (type === "error") { clearRunning(); hideStageProgress(); showError(ev.message || ev.error || "Job failed."); return; }
 }
 
 function openEventStream(id) {
@@ -645,6 +882,7 @@ async function startJob() {
   $("measure").disabled = true;
   setStatus("Uploading…");
   addStageHead("Ingest");
+  setStageProgress("ingest");
   showRunning("Uploading video…");
   try {
     let id;
@@ -708,27 +946,29 @@ async function runMockSequence() {
   setStatus("Mock replay…");
   const at = (ms, fn) => state.mockTimers.push(setTimeout(fn, ms));
   const traces = result.trace || [];
-  at(200, () => addStageHead("Plan · Muse Spark"));
+  at(200, () => { addStageHead("Plan · Muse Spark"); setStageProgress("plan"); showRunning(STAGE_LABELS.plan); });
   traces.slice(0, 1).forEach((tr, i) => at(500 + i * 500, () => addTraceRow(tr)));
-  at(1400, () => addStageHead("Track · SAM 3.1"));
-  traces.slice(1, 3).forEach((tr, i) => at(1900 + i * 600, () => addTraceRow(tr)));
-  at(3300, () => { for (const tr of result.tracks || []) applyTrack(tr); });
+  at(1400, () => { addStageHead("Track · SAM 3.1"); setStageProgress("agent"); showRunning(STAGE_LABELS.agent); });
+  traces.slice(1, 3).forEach((tr, i) => at(1900 + i * 600, () => { addTraceRow(tr); updateStageProgressFromTrace(tr); }));
+  at(3300, () => { for (const tr of result.tracks || []) applyTrack(tr); if (result.strobe_url) setStrobe(result.strobe_url); });
   at(3800, () => addStageHead("Fit · local physics"));
   traces.slice(3, 4).forEach((tr, i) => at(4100 + i * 400, () => addTraceRow(tr)));
   at(4500, () => { state.result.calibration = result.calibration; for (const f of result.fits || []) applyFit(f); });
   at(5000, () => addStageHead("Answer · Muse Spark"));
   traces.slice(4, 5).forEach((tr) => at(5150, () => addTraceRow(tr)));
   at(5300, () => { state.result.answer = result.answer; renderAnswer(result.answer, true); });
-  at(5600, () => addStageHead("Report · Muse Wonder"));
+  at(5600, () => { addStageHead("Report · Muse Wonder"); setStageProgress("report"); showRunning(STAGE_LABELS.report); });
   traces.slice(5).forEach((tr) => at(5750, () => addTraceRow(tr)));
   at(5950, () => {
     state.result.report_markdown = result.report_markdown;
     state.result.cost = result.cost;
     state.result.plan = result.plan;
     state.result.status = "done";
+    if (result.strobe_url) setStrobe(result.strobe_url);
     renderReport(result.report_markdown);
     renderCost(result.cost);
     clearRunning();
+    hideStageProgress();
     setStatus("Done (mock).");
   });
 }
@@ -892,9 +1132,22 @@ function initTransport() {
     wireChart(canvas, tip, { onSeek: seek });
   }
   window.addEventListener("resize", () => { drawOverlay(); renderCharts(); });
+  $("stage-mode").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-mode]");
+    if (btn) setStageMode(btn.dataset.mode);
+  });
+  video.addEventListener("loadeddata", () => {
+    // Show the first frame before play.
+    if (video.paused && video.currentTime === 0) {
+      try { video.currentTime = 0.001; } catch { /* not seekable yet */ }
+    }
+    updateEmptyState();
+    drawOverlay();
+  });
   video.addEventListener("loadedmetadata", () => {
     const stage = $("stage");
     if (video.videoWidth && video.videoHeight) stage.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+    updateEmptyState();
     drawOverlay();
   });
 }
@@ -902,6 +1155,13 @@ function initTransport() {
 /* ---------------- init ---------------- */
 
 async function init() {
+  try {
+    if (localStorage.getItem("physicam-how-dismissed") === "1") $("how-it-works").hidden = true;
+  } catch { /* storage unavailable */ }
+  $("how-dismiss").addEventListener("click", () => {
+    $("how-it-works").hidden = true;
+    try { localStorage.setItem("physicam-how-dismissed", "1"); } catch { /* ignore */ }
+  });
   initInput();
   initTransport();
   startSync();

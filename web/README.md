@@ -15,7 +15,7 @@ Served by the backend as static files, or standalone for mock development:
 | [index.html](index.html) | Page skeleton: top bar, input panel, video stage, agent timeline, results |
 | [style.css](style.css) | Dark instrument theme; light theme via `prefers-color-scheme`; stacks ≤ 900 px |
 | [app.js](app.js) | State, job lifecycle, SSE handling, video overlay, transport, mic, mock replay |
-| [charts.js](charts.js) | Hand-rolled canvas charts: line + residuals strip + restitution bars, hover tooltip, click-to-seek |
+| [charts.js](charts.js) | Hand-rolled canvas charts: height + residuals strip + restitution bars, hover tooltip, click-to-seek |
 | [markdown.js](markdown.js) | Safe mini markdown renderer (escapes all input; headings, lists, tables, code, links) |
 | [mock/make_mock.py](mock/make_mock.py) | Builds `mock/result.json` from the real SAM fixture and copies the demo clip |
 
@@ -32,11 +32,12 @@ The UI consumes `GET /api/jobs/{id}/events` (SSE) and tolerates both nested
 
 | Event `type` | Effect |
 | --- | --- |
-| `stage` | Section header in the timeline + optional running spinner row |
+| `stage` | Section header in the timeline, running spinner row, and stage-progress pill on the stage (`ingest`/`plan`/`agent`/`report`; the `agent` pill updates with the latest trace summary, and the pill fades out on `done`) |
 | `trace` | Timeline row: icon + model badge (SPARK/SAM/WONDER/local) by tool name, summary, ms, expandable args/summary JSON |
 | `track` | Upserts a track; overlay, legend and charts update immediately |
 | `fit` | Upserts a fit; parameter table + ghost curves + impact markers update |
-| `answer` | Answer card with count-up, plus Δ vs 9.81 m/s² (in % and σ) when the unit is m/s² |
+| `strobe` | `{url}` (or a top-level `strobe_url` on the result/event): shows the Video \| Strobe segmented control on the stage and the strobe figure at the top of the lab report |
+| `answer` | Answer card with count-up; Δ vs 9.81 m/s² (in % and σ) only when the unit is m/s², otherwise a dimensionless value ± stderr plus the `e_height` apex-height cross-check when a fit provides it |
 | `report` | `report_markdown` rendered with [markdown.js](markdown.js) |
 | `plan` / `calibration` | Stored on the result; calibration rescales charts and HUD to meters |
 | `done` | Clears the spinner, then fetches the authoritative `GET /api/jobs/{id}` |
@@ -57,6 +58,23 @@ a reload and the finished result renders without any SSE. Clicking an example
 - Charts share the video clock: a vertical cursor follows playback on every
   chart, clicking any chart (or a restitution bar) seeks the video, and the
   residuals strip is computed against the first fit curve for each track.
+- The first chart is **Height vs time** (positive up): with a calibration,
+  `h = (y_ref − y)·m_per_px` in metres, without one `(y_ref − y)` in pixels,
+  where `y_ref` is the largest tracked `y` (the lowest point). Fitted curves,
+  impact markers and residual signs are transformed the same way. When
+  `calibration.kind == "per_frame"` and a track carries `X_m`/`Y_m`, those
+  arrays are plotted directly (Y up, x/speed in metres). The restitution
+  chart uses categorical "impact 1…n" labels (no numeric x ticks), shows each
+  bar's value above it, and draws a dashed `e = 1` reference line.
+- Whenever a job or example has `video.url` (mock replay, example, live job,
+  or a `#job=` reload), the empty state hides and the `<video>` shows with its
+  overlay canvas, sized to the video's aspect ratio; the video uses
+  `preload="auto"` and seeks to 0.001 s on `loadeddata` so the first frame is
+  visible before play. The timeline auto-scrolls to the newest row and keeps
+  its running spinner row until the next event.
+- A dismissible "How it works" strip under the top bar shows the four steps
+  (Spark watches → SAM tracks → agent measures → Wonder reports) with their
+  model badge colors; dismissal is remembered in `localStorage`.
 - Keyboard: `space` play/pause, `←`/`→` step one frame (at the effective fps,
   honoring the slow-motion override). Speeds 0.1×–1×; masks/trail/fit toggles.
 
@@ -74,7 +92,12 @@ hold-to-talk fills a canned transcript. Regenerate the data with:
 It parses `tests/fixtures/bounce240_red_ball_f0-199.sam.txt.gz` with
 `meta_sam_parser`, computes mask-weighted centroids and frame-coordinate
 contours, fits parabolas around the max-y impact frame, and calibrates from
-the ball's known 80 mm diameter. Note the fixture's fall segment is not a
+the ball's known 80 mm diameter. It also writes `mock/strobe.jpg` —
+`result.json` carries `strobe_url: "mock/strobe.jpg"` — by extracting frames
+with `imageio_ffmpeg.get_ffmpeg_exe()` and compositing ~15 mask cut-outs
+(masks from `meta_sam_parser.decode_mask_to_raster`, each raster mapped onto
+its `bounds` rect) onto the first frame; the mock fit also provides an
+`e_height` apex-height cross-check. Note the fixture's fall segment is not a
 clean passive fall, so the mock fit honestly flags `e > 1` as an upper bound
 and reports g from the rebound segment.
 
@@ -93,3 +116,7 @@ Beyond the `AGENTS.md` result contract:
 - Fit objects may include `impacts: [{index, t, frame, x, y, e, e_stderr}]`
   (frame px for `x`/`y`) and `segments: [{curve: {t, x?, y}}]`; both are used
   for markers, ghost curves and the restitution bar chart when present.
+  A fit may also provide `e_height` (a number, or `{value, stderr}`) — the
+  apex-height restitution cross-check shown on dimensionless answers.
+- Results may include `strobe_url`; stage values are `ingest`, `plan`,
+  `agent` and `report`.

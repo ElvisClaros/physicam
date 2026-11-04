@@ -138,7 +138,21 @@ export function drawBarChart(canvas, bars) {
   const tops = bars.map((b) => b.value + (b.stderr || 0));
   const yr = [0, Math.max(1.15, ...tops) * 1.12];
   const xr = [0, bars.length];
-  const { X, Y } = axes(ctx, w, h, xr, yr, th, "impact", "e");
+  // Categorical x axis: no numeric x ticks (they overlap); labels are drawn
+  // under each bar below. Only the y axis / gridlines are drawn here.
+  const iw = w - PAD.l - PAD.r, ih = h - PAD.t - PAD.b;
+  const X = (v) => PAD.l + (v - xr[0]) / (xr[1] - xr[0]) * iw;
+  const Y = (v) => PAD.t + ih - (v - yr[0]) / (yr[1] - yr[0]) * ih;
+  ctx.strokeStyle = th.grid; ctx.fillStyle = th.text;
+  ctx.font = "10.5px ui-monospace, monospace"; ctx.lineWidth = 1;
+  for (let k = 0; k <= 4; k++) {
+    const v = yr[0] + (yr[1] - yr[0]) * k / 4, y = Y(v);
+    ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(w - PAD.r, y); ctx.stroke();
+    ctx.textAlign = "right"; ctx.fillText(v.toPrecision(3), PAD.l - 6, y + 3);
+  }
+  ctx.textAlign = "center"; ctx.fillText("impact", PAD.l + iw / 2, h - 2);
+  ctx.save(); ctx.translate(11, PAD.t + ih / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillText("e", 0, 0); ctx.restore();
   const bw = (X(1) - X(0)) * 0.52;
   bars.forEach((b, i) => {
     const cx = X(i + 0.5), top = Y(Math.min(b.value, yr[1])), base = Y(0);
@@ -153,14 +167,17 @@ export function drawBarChart(canvas, bars) {
     ctx.moveTo(cx - 7, eTop); ctx.lineTo(cx + 7, eTop);
     ctx.moveTo(cx - 7, eBot); ctx.lineTo(cx + 7, eBot);
     ctx.stroke();
+    // value above the error-bar cap, categorical label below the axis
     ctx.fillStyle = th.text; ctx.font = "11px ui-monospace, monospace"; ctx.textAlign = "center";
-    ctx.fillText(b.value.toFixed(2), cx, top - 8);
+    ctx.fillText(b.value.toFixed(2), cx, Math.max(PAD.t + 10, eTop - 6));
     ctx.fillText(b.label, cx, h - 12);
   });
   // physical bound e = 1
   ctx.strokeStyle = th.accent; ctx.setLineDash([5, 5]); ctx.lineWidth = 1.2;
   ctx.beginPath(); ctx.moveTo(PAD.l, Y(1)); ctx.lineTo(w - PAD.r, Y(1)); ctx.stroke();
   ctx.setLineDash([]);
+  ctx.fillStyle = th.accent; ctx.font = "10.5px ui-monospace, monospace"; ctx.textAlign = "right";
+  ctx.fillText("e = 1", w - PAD.r - 2, Y(1) - 4);
   canvas._geom = { xr, yr, pad: PAD, cfg: { bar: true, bars } };
 }
 

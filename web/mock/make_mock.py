@@ -17,6 +17,8 @@ import json
 import math
 import re
 import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -91,6 +93,7 @@ def parse_fixture() -> dict:
     areas: list[float] = []
     bboxes: list[list[float]] = []
     contours: dict[str, str] = {}
+    mask_records: list[dict] = []  # retained for the strobe composite
 
     for rec in result.records:
         if rec.kind != "mask":
@@ -115,6 +118,11 @@ def parse_fixture() -> dict:
             contours[str(fi)] = _transform_path(
                 decode_mask_to_svg_path(m), float(b.left), float(b.top), sx, sy
             )
+        mask_records.append({
+            "frame": fi, "raster": raster.copy(),
+            "bounds": (float(b.left), float(b.top), float(b.right), float(b.bottom)),
+            "width": int(m.width), "height": int(m.height),
+        })
 
     order = np.argsort(frames)
     return {
@@ -124,6 +132,7 @@ def parse_fixture() -> dict:
         "area": [areas[i] for i in order],
         "bbox": [bboxes[i] for i in order],
         "contours": contours,
+        "mask_records": sorted(mask_records, key=lambda r: r["frame"]),
     }
 
 
@@ -200,6 +209,12 @@ def bounce_analysis(track: dict, m_per_px: float, rel_cal: float) -> dict:
     g = g_px * m_per_px
     g_stderr = math.hypot(g_stderr_px * m_per_px, g * rel_cal)
 
+    # Cross-check from apex heights: e_height = sqrt(h_after / h_before),
+    # heights measured from the impact (max-y) level up to each apex (min-y).
+    h_before = float(y[imp] - np.min(y[: imp + 1])) if imp > 0 else float("nan")
+    h_after = float(y[imp] - np.min(y[imp:])) if imp < len(y) - 1 else float("nan")
+    e_height = float(math.sqrt(h_after / h_before)) if h_before and h_after and h_before > 0 else float("nan")
+
     e = abs(v_after / v_before) if v_before and math.isfinite(v_before) and v_before != 0 else float("nan")
     e_stderr = 0.04 * e if math.isfinite(e) else 0.0
     if math.isfinite(e) and e > 1.0:
@@ -234,8 +249,65 @@ def bounce_analysis(track: dict, m_per_px: float, rel_cal: float) -> dict:
             "e": round(float(e), 3) if math.isfinite(e) else None,
             "e_stderr": round(float(e_stderr), 3),
         }],
+        "e_height": ({"value": round(e_height, 3), "stderr": round(0.05 * e_height, 3), "unit": "1"}
+                     if math.isfinite(e_height) else None),
         "warnings": warnings,
     }
+
+
+def make_strobe(track_data: dict, out_path: Path, n_cutouts: int = 15) -> bool:
+    """Composite ~15 mask cut-outs from the fixture onto the first frame.
+
+    Frames are extracted with the bundled ffmpeg (``imageio_ffmpeg``); masks
+    come from ``decode_mask_to_raster`` in :func:`parse_fixture`, and each
+    mask raster is mapped onto its ``bounds`` rect in frame pixels before
+    pasting the corresponding frame's cut-out onto the first frame.
+    Returns True when ``strobe.jpg`` was written.
+    """
+    try:
+        import imageio_ffmpeg
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover
+        print(f"WARNING: strobe skipped ({exc})")
+        return False
+    records = track_data.get("mask_records") or []
+    src = CLIP_SRC if CLIP_SRC.exists() else OUT_DIR / "clip.mp4"
+    if not records or not src.exists():
+        print("WARNING: strobe skipped (no mask records or clip missing)")
+        return False
+    picks = [records[int(i)] for i in np.linspace(0, len(records) - 1, min(n_cutouts, len(records)))]
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    max_frame = max(r["frame"] for r in picks)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpd = Path(tmp)
+        subprocess.run(
+            [ffmpeg, "-y", "-v", "error", "-i", str(src),
+             "-frames:v", str(max_frame + 1), str(tmpd / "f_%04d.png")],
+            check=True,
+        )
+        # ffmpeg image2 numbering starts at 1 for the first frame.
+        def frame_image(frame_idx: int):
+            p = tmpd / f"f_{frame_idx + 1:04d}.png"
+            return Image.open(p).convert("RGB") if p.exists() else None
+
+        base = frame_image(int(picks[0]["frame"]))
+        if base is None:
+            print("WARNING: strobe skipped (first frame extract failed)")
+            return False
+        base = base.copy()
+        for rec in picks:
+            frame_img = frame_image(int(rec["frame"]))
+            if frame_img is None:
+                continue
+            left, top, right, bottom = rec["bounds"]
+            bw, bh = max(1, int(round(right - left))), max(1, int(round(bottom - top)))
+            # Mask raster maps onto the bounds rect in frame pixels.
+            mask = Image.fromarray((rec["raster"] * 255).astype(np.uint8), mode="L").resize((bw, bh))
+            cutout = frame_img.crop((int(left), int(top), int(left) + bw, int(top) + bh))
+            base.paste(cutout, (int(left), int(top)), mask)
+        base.save(out_path, quality=88)
+    print(f"wrote {out_path}: strobe from {len(picks)} mask cut-outs")
+    return True
 
 
 def main() -> None:
@@ -283,10 +355,13 @@ def main() -> None:
         "- Uncertainties combine the parabola covariance with the calibration uncertainty.\n"
     )
 
+    strobe_ok = make_strobe(track_data, OUT_DIR / "strobe.jpg")
+
     result = {
         "id": "mock-bounce-240",
         "status": "done",
         "question": "What is g?",
+        "strobe_url": "mock/strobe.jpg" if strobe_ok else None,
         "video": {
             "url": "mock/clip.mp4", "fps": FPS, "width": FRAME_W, "height": FRAME_H,
             "n_frames": int(len(t)), "duration_s": round(float(t[-1]), 4),

@@ -2,6 +2,7 @@
  "id": "mock-bounce-240",
  "status": "done",
  "question": "What is g?",
+ "strobe_url": "mock/strobe.jpg",
  "video": {
   "url": "mock/clip.mp4",
   "fps": 240.0,
@@ -2528,6 +2529,11 @@
      "e_stderr": 0.104
     }
    ],
+   "e_height": {
+    "value": 1.183,
+    "stderr": 0.059,
+    "unit": "1"
+   },
    "warnings": [
     "fall segment curvature is non-positive (g_px = -2562 px/s\u00b2); it is excluded from the pooled g",
     "fitted e > 1: the pre-impact flight is not a clean passive fall, so e is an upper bound, not a passive restitution"
