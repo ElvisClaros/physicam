@@ -10,7 +10,11 @@ const FALLBACK_COLORS = ["#ff4d4f", "#22d3ee", "#3ddc97", "#f5b544", "#f472b6", 
 const params = new URLSearchParams(location.search);
 const MOCK = params.get("mock") === "1";
 
+/** Make a backend-absolute URL relative so the app works under a sub-path. */
+function rel(url) { return typeof url === "string" ? url.replace(/^\/+/, "") : url; }
+
 const state = {
+  staticMode: false,
   jobId: null,
   result: null,          // accumulated result JSON (contract shape)
   tracks: new Map(),     // id -> track
@@ -259,6 +263,7 @@ function setStageMode(mode) {
 
 function setStrobe(url) {
   if (!url) return;
+  url = rel(url);
   state.strobeUrl = url;
   state.result.strobe_url = url;
   $("strobe-img").src = url;
@@ -869,6 +874,7 @@ function setVideoSource(url) {
   // Size the stage to the video's aspect ratio when the result declares it.
   const v = state.result?.video;
   if (v && v.width && v.height) $("stage").style.aspectRatio = `${v.width} / ${v.height}`;
+  url = rel(url);
   if (video.getAttribute("src") !== url) video.src = url;
   // Hide the empty state and show the video + overlay whenever a job or
   // example has a video (mock, example, live job and #job= reload all come
@@ -878,7 +884,7 @@ function setVideoSource(url) {
 }
 
 async function loadJob(id) {
-  const res = await fetch(`/api/jobs/${encodeURIComponent(id)}`);
+  const res = await fetch(`api/jobs/${encodeURIComponent(id)}`);
   if (!res.ok) throw new Error(`job ${id} returned ${res.status}`);
   const result = await res.json();
   applyResult(result);
@@ -931,7 +937,7 @@ function handleEvent(ev) {
 
 function openEventStream(id) {
   if (state.eventSource) state.eventSource.close();
-  const es = new EventSource(`/api/jobs/${encodeURIComponent(id)}/events`);
+  const es = new EventSource(`api/jobs/${encodeURIComponent(id)}/events`);
   state.eventSource = es;
   es.onmessage = (msg) => {
     try { handleEvent(JSON.parse(msg.data)); } catch { /* keep stream alive */ }
@@ -941,6 +947,7 @@ function openEventStream(id) {
 }
 
 async function startJob() {
+  if (state.staticMode) { setStatus("Static demo: run Physicam locally with your API key to measure your own videos."); return; }
   if (!state.videoFile && !MOCK) { setStatus("Choose or drop a video first."); return; }
   const question = $("question").value.trim() || "What is g?";
   const facts = collectFacts();
@@ -962,7 +969,7 @@ async function startJob() {
     form.append("video", state.videoFile);
     form.append("question", question);
     if (Object.keys(facts).length) form.append("facts", JSON.stringify(facts));
-    const res = await fetch("/api/jobs", { method: "POST", body: form });
+    const res = await fetch("api/jobs", { method: "POST", body: form });
     if (!res.ok) throw new Error(`POST /api/jobs returned ${res.status}`);
     const data = await res.json();
     id = data.id;
@@ -1048,14 +1055,51 @@ async function loadMockInstant() {
 
 /* ---------------- examples ---------------- */
 
+/* ---------------- static demo mode (no backend) ---------------- */
+
+async function replayStaticExample(ex) {
+  resetJob();
+  if (ex.question) $("question").value = ex.question;
+  setStatus("Replaying…");
+  const [result, evText] = await Promise.all([
+    fetch(ex.result_url).then((r) => r.json()),
+    fetch(ex.events_url).then((r) => r.text()),
+  ]);
+  state.jobId = null; // handleEvent("done") must not try to refetch a job
+  if (result.video?.url) { state.result.video = result.video; setVideoSource(result.video.url); }
+  const events = evText.split("\n").filter((l) => l.trim()).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  const total = 9000, timers = [];
+  events.forEach((ev, i) => {
+    const at = events.length > 1 ? (i / (events.length - 1)) * total : 0;
+    timers.push(setTimeout(() => { if (ev.type !== "done") handleEvent(ev); }, at));
+  });
+  timers.push(setTimeout(() => { applyResult(result); setStatus("Done (static replay)."); }, total + 400));
+  state.mockTimers = timers;
+}
+
+async function enterStaticMode() {
+  state.staticMode = true;
+  $("static-banner").hidden = false;
+  const tip = "Static demo: upload and Measure need the local Physicam server (with your API key).";
+  $("measure").disabled = true;
+  $("measure").title = tip;
+  $("dropzone").title = tip;
+  $("file-input").disabled = true;
+  try {
+    const res = await fetch("static-examples.json");
+    if (res.ok) renderExamples(await res.json());
+  } catch { /* gallery stays hidden */ }
+}
+
 async function loadExamples() {
+  if (state.staticMode) return;
   if (MOCK) {
     renderExamples([{ id: "mock-bounce-240", title: "Bouncing ball · 240 fps",
       subtitle: "Real SAM fixture", thumb_url: "", question: "What is g?", job_id: "mock-bounce-240" }]);
     return;
   }
   try {
-    const res = await fetch("/api/examples");
+    const res = await fetch("api/examples");
     if (!res.ok) return;
     const list = await res.json();
     if (Array.isArray(list) && list.length) renderExamples(list);
@@ -1070,13 +1114,14 @@ function renderExamples(list) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "example";
-    btn.innerHTML = `${ex.thumb_url ? `<img src="${esc(ex.thumb_url)}" alt="">` : ""}` +
+    btn.innerHTML = `${ex.thumb_url ? `<img src="${esc(rel(ex.thumb_url))}" alt="">` : ""}` +
       `<span class="ex-body"><span class="ex-title">${esc(ex.title || ex.id)}</span><br>` +
       `<span class="ex-sub">${esc(ex.subtitle || "")}</span></span>`;
     btn.addEventListener("click", async () => {
       if (ex.question) $("question").value = ex.question;
       try {
-        if (MOCK) await loadMockInstant();
+        if (state.staticMode && ex.events_url) await replayStaticExample(ex);
+        else if (MOCK) await loadMockInstant();
         else if (ex.job_id) { resetJob(); await loadJob(ex.job_id); setStatus("Example loaded."); }
       } catch (err) { showError(err.message || String(err)); }
     });
@@ -1141,7 +1186,7 @@ function initMic() {
         try {
           const form = new FormData();
           form.append("audio", blob, "question.webm");
-          const res = await fetch("/api/transcribe", { method: "POST", body: form });
+          const res = await fetch("api/transcribe", { method: "POST", body: form });
           if (!res.ok) throw new Error(`transcribe returned ${res.status}`);
           const data = await res.json();
           if (data.transcript) $("question").value = data.transcript;
@@ -1232,6 +1277,12 @@ async function init() {
   initInput();
   initTransport();
   startSync();
+  if (!MOCK) {
+    try {
+      const h = await fetch("api/health");
+      if (!h.ok) throw new Error("no backend");
+    } catch { await enterStaticMode(); }
+  }
   loadExamples();
   if (MOCK) {
     setStatus("Mock mode — press Measure to replay the analysis, or open the example.");

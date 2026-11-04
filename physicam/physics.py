@@ -507,16 +507,17 @@ def fit_pendulum(track, calib=None, t_range=None, options=None) -> Fit:
     T0 = T / corr if corr else T
     rel_T0 = math.hypot(eT / T if T else 0.0, sigma_corr / corr if corr else 0.0)
     eT0 = float(abs(T0) * rel_T0)
-    Q = omega / (2 * gamma) if gamma > 1e-12 else float("inf")
+    # gamma ~ 0 means Q is unbounded; emit null (JSON has no inf) not inf.
+    Q = omega / (2 * gamma) if gamma > 1e-12 else None
     q_err = float(abs(Q) * math.hypot(eomega / omega if omega else 0.0,
-                                      egamma / gamma if gamma > 1e-12 else 0.0)) if math.isfinite(Q) else 0.0
+                                      egamma / gamma if gamma > 1e-12 else 0.0)) if Q is not None else 0.0
     params: dict = {
         "T": {"value": float(T), "stderr": float(eT), "unit": "s"},
         "T0": {"value": float(T0), "stderr": float(eT0), "unit": "s"},
         "theta0_deg": {"value": float(math.degrees(theta0_rad)),
                        "stderr": float(math.degrees(theta0_err)), "unit": "deg"},
         "gamma": {"value": float(gamma), "stderr": float(egamma), "unit": "1/s"},
-        "Q": {"value": float(Q), "stderr": q_err, "unit": ""},
+        "Q": {"value": (float(Q) if Q is not None else None), "stderr": q_err, "unit": ""},
     }
 
     # --- length and g --------------------------------------------------------

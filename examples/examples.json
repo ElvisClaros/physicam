@@ -1,0 +1,22 @@
+[
+ {
+  "id": "bouncy-ball-240fps",
+  "slug": "bouncy-ball-240fps",
+  "job_id": "bouncy-ball-240fps",
+  "title": "Bouncing ball \u00b7 240 fps",
+  "subtitle": "Coefficient of restitution + g (pixel units, no ruler in frame)",
+  "question": "What is the coefficient of restitution of this ball, and what does the throw tell us about g?",
+  "thumb_url": "/api/jobs/bouncy-ball-240fps/thumb.jpg",
+  "headline": "e = 0.697; throw phase is powered, not free fall"
+ },
+ {
+  "id": "elastic-pendulum",
+  "slug": "elastic-pendulum",
+  "job_id": "elastic-pendulum",
+  "title": "Spring pendulum \u00b7 30 fps",
+  "subtitle": "Oscillation period of a mass on a spring (portrait phone video)",
+  "question": "What is the oscillation period of this spring pendulum?",
+  "thumb_url": "/api/jobs/elastic-pendulum/thumb.jpg",
+  "headline": "Oscillation period \u2248 0.963 s"
+ }
+]

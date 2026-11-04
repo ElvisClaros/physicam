@@ -147,3 +147,12 @@ def test_velocity_stderr_includes_linear_and_covariance():
     # quadratic-only estimate would be 2t*sigma_a2 = 0.2; full must differ
     assert got > 0.2
     assert _velocity_stderr(None, 1.0) == 0.0
+
+def test_pendulum_undamped_Q_is_json_safe():
+    import json
+    t = np.arange(0, 600) / 60.0
+    x = 500 + 200 * np.cos(2 * np.pi / 1.6 * t)  # gamma = 0 -> Q unbounded
+    track = make_track(t, x, np.full_like(t, 400.0), fps=60.0)
+    fit = fit_model(track, "pendulum", Calibration(0.001, 0.0, "reference", ""))
+    json.dumps(fit.to_dict())  # must not raise on inf/nan
+    assert fit.params["Q"]["value"] is None or np.isfinite(fit.params["Q"]["value"])
