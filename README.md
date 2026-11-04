@@ -2,7 +2,7 @@
 
 **Film anything that moves. Ask a question. Get a measurement with error bars.**
 
-▶ **Demo video (3 min):** https://youtu.be/up0EUcCWzc4 · **Live static demo:** https://elvisclaros.github.io/physicam/
+▶ **Demo video (3 min):** https://youtu.be/SFipmWNYOZU · **Live static demo:** https://elvisclaros.github.io/physicam/
 
 ![Physicam: live run on a real 240 fps clip, with SAM 3.1 mask, fading trail, fitted parabolas and impacts](docs/img/hero.png)
 
