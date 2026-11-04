@@ -1,25 +1,6 @@
-# Task 04: polish, stroboscopic composite, examples, README
+# Task 05: examples, README, static demo, final quality
 
-Read `AGENTS.md`, then `physicam/` and `web/` as they are now. The backend and UI work end to end.
-This task makes the project demo-ready and judge-ready.
-
-## A. Stroboscopic composite (`physicam/strobe.py`), a signature visual
-This is the classic physics-textbook "strobe photo", made from SAM masks. For each track, take the
-pixel-accurate masks from every k-th frame and paste the object's pixels from those frames onto a
-clean background plate. Choose k so that you get about 12–25 copies with little overlap. The
-background plate is the per-pixel temporal median of ~15 frames spread over the clip, which removes
-the moving object. Add a subtle drop shadow or outline. Optionally draw the fitted curve as a thin
-dashed line and small time labels ("0.10 s").
-
-- Needs mask rasters per frame. If the track only keeps contours, re-parse the cached SAM text (it is
-  on disk) to get rasters. Do not call the API again.
-- Output `job_dir/strobe.jpg`. The pipeline creates it after tracking. Add `strobe_url` to
-  result.json and emit a `strobe` SSE event.
-- In the UI, add a "Strobe" tab or toggle on the video stage that shows the image. Use it in the
-  report too: the report markdown may reference it.
-
-## B. UI
-The UI fixes (strobe view, height chart, stage progress, etc.) were done in task 04a. Only touch `web/` if the backend changes require it, such as a new result field.
+Read `AGENTS.md`, `physicam/`, `web/` and `docs/muse-code-tasks/04-integration-strobe.md` (already done).
 
 ## C. Examples (`examples/`)
 - `examples/fetch_examples.py` downloads the CC-licensed clips from Wikimedia Commons, using the
