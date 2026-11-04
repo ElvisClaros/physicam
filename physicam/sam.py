@@ -56,6 +56,120 @@ def raster_path_to_frame(svg_path: str, left: float, top: float,
     return _NUM_RE.sub(repl, svg_path)
 
 
+def mask_extents(raster: np.ndarray, bounds: tuple[float, float, float, float]) -> dict:
+    """Oriented extents of a binary mask raster mapped to frame coordinates.
+
+    *raster* is a 2-D 0/1 (or boolean) array smaller than the frame;
+    *bounds* is ``(left, top, right, bottom)`` in frame pixels onto which
+    the raster maps. Foreground pixel centres are
+    ``x = left + (j + 0.5) * sx``, ``y = top + (i + 0.5) * sy`` with
+    ``sx = (right-left)/raster_width``, ``sy = (bottom-top)/raster_height``.
+
+    Principal axes come from the second central moments. Projecting all
+    foreground centres onto the major/minor axes gives
+    ``long_extent_px = (max - min) + pixel_size_along_axis`` (and likewise
+    for the short axis), where ``pixel_size_along_axis`` is the projected
+    width of one raster pixel, ``|vx|*sx + |vy|*sy``. This is the true
+    side length for a rectangle, unlike the equivalent-ellipse major axis
+    ``4*sqrt(lambda_max)`` which overstates a rectangle side by
+    ``4/sqrt(12) ~= 1.155``. The robust variants replace min/max with the
+    0.5th/99.5th percentiles (plus the same pixel-size correction) so a
+    few stray mask pixels do not inflate the size.
+    """
+    arr = np.asarray(raster)
+    left, top, right, bottom = (float(v) for v in bounds)
+    if arr.ndim != 2 or arr.size == 0 or not np.any(arr):
+        bw, bh = max(right - left, 0.0), max(bottom - top, 0.0)
+        return {
+            "centroid": [(left + right) / 2.0, (top + bottom) / 2.0],
+            "area_px": 0.0, "eq_diameter_px": 0.0,
+            "ellipse_major_px": 0.0, "ellipse_minor_px": 0.0,
+            "major_axis_px": 0.0, "minor_axis_px": 0.0,
+            "orientation_deg": 0.0,
+            "bbox_width_px": bw, "bbox_height_px": bh,
+            "width_px": bw, "height_px": bh,
+            "oriented_width_px": bw, "oriented_height_px": bh,
+            "long_extent_px": 0.0, "short_extent_px": 0.0,
+            "robust_long_extent_px": 0.0, "robust_short_extent_px": 0.0,
+            "longest_px": 0.0, "shortest_px": 0.0,
+        }
+    rh, rw = arr.shape
+    sx = (right - left) / rw if rw else 0.0
+    sy = (bottom - top) / rh if rh else 0.0
+    ii, jj = np.nonzero(arr)
+    xs = left + (jj.astype(float) + 0.5) * sx
+    ys = top + (ii.astype(float) + 0.5) * sy
+    cx, cy = float(xs.mean()), float(ys.mean())
+    dx, dy = xs - cx, ys - cy
+    mu20 = float((dx * dx).mean())
+    mu02 = float((dy * dy).mean())
+    mu11 = float((dx * dy).mean())
+    cov = np.array([[mu20, mu11], [mu11, mu02]])
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = np.argsort(eigvals)[::-1]
+    eigvals = eigvals[order]
+    eigvecs = eigvecs[:, order]
+    major_vec = eigvecs[:, 0].astype(float)
+    minor_vec = eigvecs[:, 1].astype(float)
+    # Normalise the major-axis angle to (-90, 90] degrees.
+    angle_deg = math.degrees(math.atan2(float(major_vec[1]), float(major_vec[0])))
+    while angle_deg <= -90.0:
+        angle_deg += 180.0
+        major_vec = -major_vec
+    while angle_deg > 90.0:
+        angle_deg -= 180.0
+        major_vec = -major_vec
+    proj_major = dx * major_vec[0] + dy * major_vec[1]
+    proj_minor = dx * minor_vec[0] + dy * minor_vec[1]
+
+    def _pix(vec: np.ndarray) -> float:
+        return abs(float(vec[0])) * sx + abs(float(vec[1])) * sy
+
+    long_extent = float(proj_major.max() - proj_major.min()) + _pix(major_vec)
+    short_extent = float(proj_minor.max() - proj_minor.min()) + _pix(minor_vec)
+    lo_m, hi_m = np.percentile(proj_major, [0.5, 99.5])
+    lo_s, hi_s = np.percentile(proj_minor, [0.5, 99.5])
+    robust_long = float(hi_m - lo_m) + _pix(major_vec)
+    robust_short = float(hi_s - lo_s) + _pix(minor_vec)
+    area = float(len(xs)) * sx * sy
+    ellipse_major = 4.0 * math.sqrt(max(float(eigvals[0]), 0.0))
+    ellipse_minor = 4.0 * math.sqrt(max(float(eigvals[1]), 0.0))
+    bw, bh = float(right - left), float(bottom - top)
+    # Oriented width/height: assign long/short by the major axis angle.
+    if abs(angle_deg) <= 45.0:
+        oriented_w, oriented_h = robust_long, robust_short
+        oriented_w_plain, oriented_h_plain = long_extent, short_extent
+    else:
+        oriented_w, oriented_h = robust_short, robust_long
+        oriented_w_plain, oriented_h_plain = short_extent, long_extent
+    return {
+        "centroid": [cx, cy],
+        "area_px": area,
+        "eq_diameter_px": math.sqrt(4.0 * area / math.pi) if area > 0 else 0.0,
+        "ellipse_major_px": float(ellipse_major),
+        "ellipse_minor_px": float(ellipse_minor),
+        "major_axis_px": float(ellipse_major),
+        "minor_axis_px": float(ellipse_minor),
+        "orientation_deg": float(angle_deg),
+        "bbox_width_px": bw, "bbox_height_px": bh,
+        "width_px": bw, "height_px": bh,
+        "oriented_width_px": float(oriented_w),
+        "oriented_height_px": float(oriented_h),
+        "oriented_width_plain_px": float(oriented_w_plain),
+        "oriented_height_plain_px": float(oriented_h_plain),
+        "long_extent_px": float(long_extent),
+        "short_extent_px": float(short_extent),
+        "robust_long_extent_px": float(robust_long),
+        "robust_short_extent_px": float(robust_short),
+        "longest_px": float(long_extent),
+        "shortest_px": float(short_extent),
+    }
+
+
+# Backwards-friendly alias.
+oriented_extents = mask_extents
+
+
 # ---------------------------------------------------------------------------
 # Track
 # ---------------------------------------------------------------------------
@@ -583,35 +697,34 @@ def segment_image(client: "MetaClient", pil_image: Image.Image, prompt: str) -> 
             b = rec.bounds  # type: ignore[union-attr]
             x1, y1, x2, y2 = float(b.left), float(b.top), float(b.right), float(b.bottom)
             conf = float(rec.confidence or 0.0)  # type: ignore[union-attr]
+        bw, bh = float(x2 - x1), float(y2 - y1)
         item: dict = {"object_id": oid, "bbox": [x1, y1, x2, y2], "conf": conf,
-                      "width_px": x2 - x1, "height_px": y2 - y1, "area_px": 0.0,
-                      "major_axis_px": max(x2 - x1, y2 - y1), "minor_axis_px": min(x2 - x1, y2 - y1),
-                      "longest_px": max(x2 - x1, y2 - y1)}
+                      "width_px": bw, "height_px": bh,
+                      "bbox_width_px": bw, "bbox_height_px": bh, "area_px": 0.0,
+                      "ellipse_major_px": max(bw, bh), "ellipse_minor_px": min(bw, bh),
+                      "major_axis_px": max(bw, bh), "minor_axis_px": min(bw, bh),
+                      "orientation_deg": 0.0,
+                      "long_extent_px": max(bw, bh), "short_extent_px": min(bw, bh),
+                      "robust_long_extent_px": max(bw, bh), "robust_short_extent_px": min(bw, bh),
+                      "oriented_width_px": bw, "oriented_height_px": bh,
+                      "longest_px": max(bw, bh), "shortest_px": min(bw, bh),
+                      "eq_diameter_px": math.sqrt(4.0 * bw * bh / math.pi) if bw > 0 and bh > 0 else 0.0}
         if rec is not None:
             m = rec.mask  # type: ignore[union-attr]
-            raster = np.frombuffer(decode_mask_to_raster(m), np.uint8).reshape(m.height, m.width).astype(float)
-            sx = (x2 - x1) / m.width if m.width else 0.0
-            sy = (y2 - y1) / m.height if m.height else 0.0
-            count = float(raster.sum())
-            if count > 0:
-                jj, ii = np.meshgrid(np.arange(m.width), np.arange(m.height))
-                cxr = float((raster * jj).sum() / count)
-                cyr = float((raster * ii).sum() / count)
-                # Second central moments in raster units -> frame px.
-                mu20 = float((raster * (jj - cxr) ** 2).sum() / count) * sx * sx
-                mu02 = float((raster * (ii - cyr) ** 2).sum() / count) * sy * sy
-                mu11 = float((raster * (jj - cxr) * (ii - cyr)).sum() / count) * sx * sy
-                cov = np.array([[mu20, mu11], [mu11, mu02]])
-                eig = np.linalg.eigvalsh(cov)
-                # Axis lengths of the equivalent ellipse (full lengths).
-                major = 4.0 * math.sqrt(max(float(eig[1]), 0.0))
-                minor = 4.0 * math.sqrt(max(float(eig[0]), 0.0))
-                item.update({
-                    "area_px": count * sx * sy,
-                    "centroid": [x1 + (cxr + 0.5) * sx, y1 + (cyr + 0.5) * sy],
-                    "major_axis_px": major, "minor_axis_px": minor,
-                    "longest_px": max(major, x2 - x1, y2 - y1),
-                    "eq_diameter_px": math.sqrt(4.0 * count * sx * sy / math.pi),
-                })
+            # Use mask bounds when available: the raster maps onto them.
+            try:
+                b = rec.bounds  # type: ignore[union-attr]
+                bx1, by1, bx2, by2 = float(b.left), float(b.top), float(b.right), float(b.bottom)
+            except Exception:
+                bx1, by1, bx2, by2 = x1, y1, x2, y2
+            raster = np.frombuffer(decode_mask_to_raster(m), np.uint8).reshape(m.height, m.width)
+            if float(raster.sum()) > 0:
+                item.update(mask_extents(raster, (bx1, by1, bx2, by2)))
+                # Preserve the SAM box as the reported bbox.
+                item["bbox"] = [x1, y1, x2, y2]
+                item["bbox_width_px"] = bw
+                item["bbox_height_px"] = bh
+                item["width_px"] = bw
+                item["height_px"] = bh
         out.append(item)
     return out

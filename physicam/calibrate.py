@@ -167,6 +167,115 @@ def _smooth_diameter(t: np.ndarray, d: np.ndarray) -> tuple[np.ndarray, float]:
     return smoothed, resid_rel
 
 
+KNOWN_REFERENCE_ASPECT_RATIOS: dict[str, float] = {
+    "a4": 1.414,
+    "paper": 1.414,
+    "sheet": 1.414,
+    "letter": 1.294,
+    "credit card": 1.586,
+    "card": 1.586,
+}
+# Aliases for convenience / tests.
+KNOWN_ASPECT_RATIOS = KNOWN_REFERENCE_ASPECT_RATIOS
+REFERENCE_ASPECT_RATIOS = KNOWN_REFERENCE_ASPECT_RATIOS
+
+
+def known_aspect_ratio(prompt: str) -> float | None:
+    """Known long/short aspect ratio for a reference prompt, or None."""
+    low = str(prompt or "").lower()
+    for key in sorted(KNOWN_REFERENCE_ASPECT_RATIOS, key=len, reverse=True):
+        if key in low:
+            return float(KNOWN_REFERENCE_ASPECT_RATIOS[key])
+    return None
+
+
+def aspect_ratio_check(prompt: str, measured_ratio: float) -> tuple[str | None, float]:
+    """Compare *measured_ratio* to the known ratio for *prompt*.
+
+    Returns ``(perspective_warning, discrepancy)`` where discrepancy is
+    the relative difference ``|measured-known|/known``. A warning is
+    returned only when the discrepancy exceeds 8%.
+    """
+    known = known_aspect_ratio(prompt)
+    if known is None or not measured_ratio or not math.isfinite(measured_ratio):
+        return None, 0.0
+    discrepancy = abs(float(measured_ratio) - known) / known
+    if discrepancy > 0.08:
+        return (f"perspective_warning: measured aspect {measured_ratio:.3f} vs expected "
+                f"{known:.3f} for {prompt!r} (discrepancy {discrepancy:.1%}); "
+                f"reference may be tilted relative to the camera"), discrepancy
+    return None, discrepancy
+
+
+def _result_extents(result: dict) -> dict[str, float]:
+    """Normalise a ``segment_image`` result dict to extent values (px)."""
+    def _get(*keys: str) -> float:
+        for k in keys:
+            v = result.get(k)
+            if v is not None:
+                try:
+                    f = float(v)
+                except Exception:
+                    continue
+                if math.isfinite(f) and f > 0:
+                    return f
+        return 0.0
+
+    robust_long = _get("robust_long_extent_px", "long_extent_px", "longest_px", "ellipse_major_px", "major_axis_px")
+    robust_short = _get("robust_short_extent_px", "short_extent_px", "shortest_px", "ellipse_minor_px", "minor_axis_px")
+    long_px = _get("long_extent_px", "longest_px", "robust_long_extent_px")
+    short_px = _get("short_extent_px", "shortest_px", "robust_short_extent_px")
+    if robust_long == 0.0:
+        robust_long = long_px
+    if robust_short == 0.0:
+        robust_short = short_px
+    angle = result.get("orientation_deg")
+    try:
+        angle_f = float(angle) if angle is not None else None
+    except Exception:
+        angle_f = None
+    oriented_w = _get("oriented_width_px")
+    oriented_h = _get("oriented_height_px")
+    if oriented_w == 0.0 or oriented_h == 0.0:
+        if angle_f is not None and robust_long > 0 and robust_short > 0:
+            if abs(angle_f) <= 45.0:
+                oriented_w, oriented_h = robust_long, robust_short
+            else:
+                oriented_w, oriented_h = robust_short, robust_long
+        else:
+            oriented_w = _get("width_px", "bbox_width_px")
+            oriented_h = _get("height_px", "bbox_height_px")
+    return {
+        "robust_long": robust_long, "robust_short": robust_short,
+        "long": long_px, "short": short_px,
+        "eq_diameter": _get("eq_diameter_px"),
+        "oriented_width": oriented_w, "oriented_height": oriented_h,
+        "bbox_width": _get("bbox_width_px", "width_px"),
+        "bbox_height": _get("bbox_height_px", "height_px"),
+    }
+
+
+def _select_reference_px(result: dict, dimension: str) -> tuple[float, str | None]:
+    """Pixel size in *result* corresponding to *dimension*; optional warning."""
+    ext = _result_extents(result)
+    if dimension == "longest":
+        return ext["robust_long"], None
+    if dimension == "shortest":
+        return ext["robust_short"], None
+    if dimension == "width":
+        return ext["oriented_width"], None
+    if dimension == "height":
+        return ext["oriented_height"], None
+    if dimension == "diameter":
+        long_px, short_px = ext["robust_long"], ext["robust_short"]
+        aspect = (long_px / short_px) if short_px > 0 else 0.0
+        if aspect > 1.15 and long_px > 0:
+            return long_px, (f"warning: diameter requested but aspect {aspect:.3f} > 1.15 "
+                             f"(far from round); using long extent {long_px:.2f} px instead of eq_diameter")
+        return ext["eq_diameter"], None
+    raise ValueError(f"dimension must be longest|shortest|width|height|diameter, got {dimension!r}")
+
+
 def none() -> Calibration:
     """No calibration: results stay in pixel units."""
     return Calibration(m_per_px=1.0, rel_uncertainty=0.0, method="none",
@@ -248,12 +357,18 @@ def from_reference(client: "MetaClient", video_path, t: float, prompt: str,
                    duration_s: float | None = None) -> Calibration:
     """Calibrate from a reference object of known size segmented on 3 frames.
 
-    *dimension* is one of "longest" | "width" | "height" | "diameter", selecting
-    which measured pixel extent corresponds to *real_size_m*. Uncertainty uses
-    1 px of edge error per side (2 px total) plus the spread between frames.
+    *dimension* is one of "longest" | "shortest" | "width" | "height" |
+    "diameter", selecting which measured pixel extent corresponds to
+    *real_size_m*: ``longest``/``shortest`` use the robust oriented
+    extents, ``width``/``height`` use the oriented extents assigned by
+    angle to the image axes, and ``diameter`` uses the equivalent
+    diameter (falling back to the long extent, with a warning, when the
+    object is far from round). Uncertainty uses 1 px of edge error per
+    side (2 px total) plus the spread between frames; a known-aspect
+    shape check may add a ``perspective_warning`` and extra uncertainty.
     """
-    if dimension not in ("longest", "width", "height", "diameter"):
-        raise ValueError(f"dimension must be longest|width|height|diameter, got {dimension!r}")
+    if dimension not in ("longest", "shortest", "width", "height", "diameter"):
+        raise ValueError(f"dimension must be longest|shortest|width|height|diameter, got {dimension!r}")
     from physicam.sam import segment_image
     from physicam.video import extract_frame, probe
 
@@ -266,20 +381,20 @@ def from_reference(client: "MetaClient", video_path, t: float, prompt: str,
         max(0.0, t - 0.25 * duration_s), t, min(duration_s, t + 0.25 * duration_s)]
     times = sorted(set(round(x, 3) for x in times))
     sizes: list[float] = []
+    ratios: list[float] = []
+    warnings: list[str] = []
     for tt in times:
         img = extract_frame(video_path, tt)
         results = segment_image(client, img, prompt)
         if not results:
             continue
         best = max(results, key=lambda r: r.get("conf", 0.0))
-        if dimension == "width":
-            px = float(best["width_px"])
-        elif dimension == "height":
-            px = float(best["height_px"])
-        elif dimension == "diameter":
-            px = float(best.get("eq_diameter_px") or best["longest_px"])
-        else:
-            px = float(best["longest_px"])
+        px, warn = _select_reference_px(best, dimension)
+        if warn and warn not in warnings:
+            warnings.append(warn)
+        ext = _result_extents(best)
+        if ext["robust_long"] > 0 and ext["robust_short"] > 0:
+            ratios.append(ext["robust_long"] / ext["robust_short"])
         if px > 0:
             sizes.append(px)
     if not sizes:
@@ -288,7 +403,18 @@ def from_reference(client: "MetaClient", video_path, t: float, prompt: str,
     spread = float(np.std(sizes)) / med if len(sizes) > 1 and med else 0.0
     edge_rel = 2.0 / med if med else 0.0  # 1 px per side
     rel = math.hypot(edge_rel, spread)
+    details = (f"dimension={dimension}, sizes_px={[round(s, 2) for s in sizes]}, median={med:.2f} px, "
+               f"edge_rel={edge_rel:.3f}, spread_rel={spread:.3f}, real_size={real_size_m} m")
+    if ratios:
+        measured_ratio = float(np.median(ratios))
+        details += f", measured_aspect={measured_ratio:.3f}"
+        perspective_warning, discrepancy = aspect_ratio_check(prompt, measured_ratio)
+        if perspective_warning:
+            extra = 0.5 * discrepancy
+            rel = rel + extra
+            details += f"; {perspective_warning}; rel_uncertainty increased by {extra:.3f} (half the discrepancy)"
+    for warn in warnings:
+        details += f"; {warn}"
     return Calibration(
         m_per_px=real_size_m / med, rel_uncertainty=rel, method="reference",
-        details=f"dimension={dimension}, sizes_px={[round(s,2) for s in sizes]}, median={med:.2f} px, "
-                f"edge_rel={edge_rel:.3f}, spread_rel={spread:.3f}, real_size={real_size_m} m")
+        details=details)

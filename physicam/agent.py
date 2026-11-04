@@ -39,9 +39,9 @@ TOOLS: list[dict] = [
          "prompt": {"type": ["string", "null"]}, "prompts": {"type": ["array", "null"], "items": {"type": "string"}},
          "t_start": {"type": ["number", "null"]}, "t_end": {"type": ["number", "null"]}},
          "required": [], "additionalProperties": False}},
-    {"type": "function", "name": "calibrate_reference", "description": "Calibrate from a static reference object of known size.",
+    {"type": "function", "name": "calibrate_reference", "description": "Calibrate from a static reference object of known size. dimension selects which measured extent real_size_m corresponds to: longest (default, robust oriented long extent), shortest (robust oriented short extent), width/height (oriented extents assigned by angle to the image axes), or diameter (equivalent diameter).",
      "parameters": {"type": "object", "properties": {
-         "prompt": {"type": "string"}, "real_size_m": {"type": "number"}, "dimension": {"type": "string"}},
+         "prompt": {"type": "string"}, "real_size_m": {"type": "number"}, "dimension": {"type": "string", "enum": ["longest", "shortest", "width", "height", "diameter"], "default": "longest"}},
          "required": ["prompt", "real_size_m"], "additionalProperties": False}},
     {"type": "function", "name": "calibrate_from_track", "description": "Calibrate from a tracked object's known diameter. per_frame enables perspective correction (default true when apparent size varies >3%).",
      "parameters": {"type": "object", "properties": {
