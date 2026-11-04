@@ -1,40 +1,31 @@
 ## Question
 
-What is the oscillation period of this spring pendulum, in which a small metal weight on a hanging coil spring swings side-to-side?
+What is the oscillation period of this spring pendulum?
 
 ## What Physicam saw
 
-Physicam tracked the metal weight, labelled “metal ball” (track t1), over 491 frames from 0.433 s to 16.767 s. The video contained 504 frames and lasted 16.800 s. The camera was static, but motion blur was noted as a quality issue. No spatial calibration was available, although spatial calibration is not needed to determine a period from times alone.
+Physicam tracked a small shiny metal bob at the bottom of a hanging coil spring, swinging side-to-side. The track, labelled metal ball, contains 491 frames from 0.433 s to 16.767 s. The video has 504 frames, a duration of 16.800 s, and a frame rate of 30.00 frames/s. The camera was static, but motion blur was noted. No spatial calibration or reference length was available, so positions were analysed in pixels; calibration is not required for a period measurement.
 
 ## Method
 
-The horizontal position, x(t), of the tracked weight was fitted with a damped-sinusoid oscillator model over the full tracked interval. A pendulum fit was also attempted. The oscillator result was checked against an independent refit using only the first half, from 0.433 s to 8.500 s, and by comparing periods fitted separately to the two halves of the full record. The adopted period was taken from the full-range oscillator fit.
+The horizontal position, x, of the bob was tracked over time. Three fits were examined: a pendulum fit over the full track and damped-sinusoid oscillator fits over the full track and its first half. The pendulum circle fit was rejected because its pivot was not above the bob and its residuals were much larger. The reported period was therefore taken from the full-range oscillator fit, with the pendulum fit, first-half oscillator fit, and split-half periods used as consistency checks.
 
 ## Results
 
-| Quantity | Model / interval | Value |
-|---|---|---:|
-| Oscillation period, adopted | Oscillator, 0.433–16.767 s | 0.9633 ± 0.0060 s |
-| Oscillation period | Oscillator, full range, fit uncertainty | 0.9633 ± 0.0039 s |
-| Oscillation period | Oscillator, 0.433–8.500 s | 0.9603 ± 0.0078 s |
-| Oscillation period | Pendulum, full range | 0.9648 ± 0.0058 s |
-| Angular frequency | Oscillator, full range | 6.522 ± 0.026 rad/s |
-| Damping coefficient, γ | Oscillator, full range | 0.024 ± 0.015 1/s |
-| Amplitude | Oscillator, full range | 204 ± 25 px |
-| k/m | Oscillator, full range | 42.54 ± 0.34 1/s² |
-| Fit quality | Oscillator, full range | R² = 0.9653, RMSE = 22.81 px |
-| Fit quality | Pendulum, full range | R² = 0.6896, RMSE = 221.9 px |
+| Fit | Time range (s) | Period (s) | R² | RMSE (px) | Points |
+|---|---|---|---|---|---|
+| Pendulum, full range | 0.433–16.767 | 0.9648 ± 0.0058 | 0.6896 | 221.9 | 491 |
+| Oscillator, full range | 0.433–16.767 | 0.9633 ± 0.0039 | 0.9653 | 22.81 | 491 |
+| Oscillator, first half | 0.433–8.500 | 0.9603 ± 0.0078 | 0.9685 | 23.92 | 243 |
 
-The half-period checks for the full oscillator fit were 0.961 s and 0.967 s.
+The adopted result is T = 0.963 ± 0.006 s. For the full-range oscillator fit, ω = 6.522 ± 0.026 rad/s, γ = 0.024 ± 0.015 1/s, and amplitude = 204 ± 25 px.
 
 ## Discussion
 
-There is no independently measured accepted period with which to compare the result. The pendulum fit gave a similar period, but its much poorer R², large RMSE, and pivot warning make it unreliable for geometry. Its predicted length, 0.076 ± 0.025 m, follows from assuming g = 9.81, so it is not a measurement of g or an independent check.
+There is no accepted period value in the supplied data for direct comparison. The three period estimates agree closely: 0.9648 s, 0.9633 s, and 0.9603 s. The full-range oscillator split halves gave 0.961 s and 0.967 s, supporting a stable period. The oscillator fit explains the motion far better than the pendulum fit, whose R² is only 0.6896 and whose predicted pivot geometry failed. The length implied using g = 9.81 m/s² was 0.076 ± 0.025 m, but this is a derived fact, not a measurement of g or length; g was not computed because no calibrated length was available.
 
-For the oscillator fit, the statistical and systematic period uncertainties were 0.002194 s and 0.003168 s, respectively; “period” was identified as the dominant error source. Agreement between the full-range period, the first-half refit, and the two half-fits supports 0.9633 ± 0.0060 s.
-
-However, the residuals contain substantial structure: the reduced chi-squared was 63.99, and the fit warned of possible air drag, perspective, or an incorrect model. Thus the sinusoid describes the timing well but not every detail of the motion. Motion blur may also shift tracked positions.
+Period was identified as the dominant error source. Despite the high oscillator R², its reduced chi-square of 63.99 and the flagged large residual structure indicate systematic mismatch, possibly from motion blur, perspective, air drag, or the spring-pendulum motion not being a simple planar pendulum. The damping estimate is also uncertain relative to its size.
 
 ## How to measure better next time
 
-Reduce motion blur, keep the swing in a plane parallel to the camera, and include a calibrated length reference and visible pivot. Those improvements would test the pendulum geometry as well as the period, reduce perspective and tracking errors, and allow residual structure to be distinguished from camera or tracking artefacts.
+Reduce motion blur with brighter lighting or a faster shutter, keep the swing in one plane facing the camera, and make the pivot and full spring visible. Add a calibrated length reference in the swing plane so length and g can be tested rather than assumed. Record a longer, steady oscillation and repeat the measurement to check period stability.

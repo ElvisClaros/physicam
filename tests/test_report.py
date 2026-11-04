@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from physicam.report import _round_long_decimals, compact_result, write_report
+from physicam.report import _round_long_decimals, compact_result, strip_latex, write_report
 
 
 def _result():
@@ -48,6 +48,14 @@ def test_round_long_decimals_postprocess():
     assert "0.9648" in out
     assert "0.005818" in out
     assert "16.766667" in out  # exactly 6 decimal digits: untouched
+
+
+def test_strip_latex_plain_unicode():
+    raw = r"$C_d$ = $0.559 \pm 0.032$, $t_{f,\mathrm{theory}}$, $k$ m$^{0.5}$/s, $R^2$, $\frac{a}{b}$, $\sqrt{g}$, $a \times b \cdot c$"
+    out = strip_latex(raw)
+    assert "$" not in out and "\\" not in out
+    assert "C_d" in out and "±" in out and "t_f,theory" in out
+    assert "²" in out and "a/b" in out and "√(g)" in out and "×" in out and "·" in out
 
 
 def test_write_report_prompt_and_postprocess_with_fake_client():

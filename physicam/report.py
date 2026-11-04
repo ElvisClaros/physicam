@@ -75,8 +75,43 @@ def _round_long_decimals(text: str) -> str:
     return _LONG_DECIMAL_RE.sub(_sub, text)
 
 
+_SUPERSCRIPT = str.maketrans("0123456789+-.()", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻˙⁽⁾")
+
+
+def _sup(text: str) -> str:
+    """Superscript *text* if every char has a superscript form, else ^text."""
+    if text and all(ch in "0123456789+-.()" for ch in text):
+        return text.translate(_SUPERSCRIPT)
+    return f"^{text}"
+
+
+def strip_latex(text: str) -> str:
+    """Replace LaTeX math markup with plain Unicode (renderer shows raw TeX)."""
+    if not text:
+        return text
+    out = text
+    # \frac{a}{b} -> a/b and \sqrt{x} -> √(x) (repeat for nesting).
+    for _ in range(3):
+        new = re.sub(r"\\frac\{([^{}]*)\}\{([^{}]*)\}", r"\1/\2", out)
+        new = re.sub(r"\\sqrt\{([^{}]*)\}", r"√(\1)", new)
+        new = re.sub(r"\\(?:mathrm|text|operatorname)\{([^{}]*)\}", r"\1", new)
+        if new == out:
+            break
+        out = new
+    out = out.replace("\\pm", "±").replace("\\times", "×").replace("\\cdot", "·")
+    out = out.replace("\\approx", "≈").replace("\\le", "≤").replace("\\ge", "≥")
+    out = out.replace("\\infty", "∞").replace("\\,", " ").replace("\\;", " ")
+    out = out.replace("$$", "").replace("$", "")
+    out = re.sub(r"\^\{([^{}]*)\}", lambda m: _sup(m.group(1)), out)
+    out = re.sub(r"_\{([^{}]*)\}", r"_\1", out)
+    out = re.sub(r"\^(-?\d)", lambda m: _sup(m.group(1)), out)
+    out = re.sub(r"\\([a-zA-Z]+)", r"\1", out)
+    return out
+
+
 # Backwards-friendly alias.
 postprocess_report_numbers = _round_long_decimals
+postprocess_report_latex = strip_latex
 
 
 def compact_result(result: dict) -> dict:
@@ -141,7 +176,11 @@ def write_report(client, result: dict) -> str:
         "no raw floats (do not copy long decimal expansions such as 0.43333333333333335). "
         "Round a value to the decimal place of its uncertainty, giving the uncertainty "
         "to 2 significant digits; when there is no uncertainty use 4 significant digits. "
-        "Give times to 3 decimal places.\n\n"
+        "Give times to 3 decimal places. "
+        "Do not use LaTeX or dollar-sign math delimiters anywhere: write plain Unicode instead "
+        "(±, ×, ·, ², ½, √(…)); write subscripts without markup as Cd, t_f, h_0 "
+        "(Cd for the discharge coefficient, with no underscore), and write units plainly "
+        "(for example m⁰·⁵/s or sqrt(m)/s, never a superscript in braces).\n\n"
         + json.dumps(compact, indent=1)[:8000])
     models: list[tuple[str, str]] = []
     settings = getattr(client, "settings", None) if client is not None else None
@@ -151,7 +190,7 @@ def write_report(client, result: dict) -> str:
     else:
         models = [("muse-wonder-1.0", "Wonder"), ("muse-spark-1.3", "Spark")]
     if client is None:
-        return _round_long_decimals(_template_report(result))
+        return _round_long_decimals(strip_latex(_template_report(result)))
     for model, _label in models:
         try:
             body = {"model": model, "max_output_tokens": 2500,
@@ -164,7 +203,7 @@ def write_report(client, result: dict) -> str:
                 from physicam.meta_client import MetaClient
                 text = MetaClient.output_text(resp)
             if text and text.strip():
-                return _round_long_decimals(text.strip())
+                return _round_long_decimals(strip_latex(text.strip()))
         except Exception:
             continue
-    return _round_long_decimals(_template_report(result))
+    return _round_long_decimals(strip_latex(_template_report(result)))

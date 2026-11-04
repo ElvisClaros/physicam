@@ -76,6 +76,39 @@ function formatInfoValue(v) {
   }
   return String(v);
 }
+/** True when *v* can be shown inline in diagnostics: scalar or short (≤6) flat array. */
+function isShortInfoValue(v) {
+  if (v == null || typeof v === "number" || typeof v === "boolean" || typeof v === "string") return true;
+  return Array.isArray(v) && v.length <= 6 &&
+    v.every((x) => x == null || ["number", "boolean", "string"].includes(typeof x));
+}
+/** One-line summary of a long array / object for the diagnostics table. */
+function summarizeInfoValue(key, v) {
+  if (Array.isArray(v)) return `array: n = ${v.length}`;
+  if (v && typeof v === "object") {
+    const parts = [];
+    if (v.n != null && isFinite(v.n)) parts.push(`n = ${v.n}`);
+    const rms = v.rms_h_over_h0 ?? v.rms_norm;
+    if (rms != null && isFinite(rms)) parts.push(`RMS ${fmtSig(rms)}·h0`);
+    else if (v.rms_cm != null && isFinite(v.rms_cm)) parts.push(`RMS ${fmtSig(v.rms_cm)} cm`);
+    if (v.max_h_over_h0 != null && isFinite(v.max_h_over_h0)) parts.push(`max ${fmtSig(v.max_h_over_h0)}·h0`);
+    // Empirical model comparison: {quadratic: {r2}, cubic: {r2}, …}.
+    const modelParts = Object.entries(v)
+      .filter(([, x]) => x && typeof x === "object" && !Array.isArray(x) && x.r2 != null && isFinite(x.r2))
+      .map(([k, x]) => `${k} R² ${fmtSig(x.r2)}`);
+    if (modelParts.length) parts.push(...modelParts);
+    if (!parts.length) {
+      const scalars = Object.entries(v)
+        .filter(([, x]) => x == null || ["number", "boolean", "string"].includes(typeof x))
+        .slice(0, 4).map(([k, x]) => `${k}=${formatInfoValue(x)}`);
+      if (scalars.length) parts.push(...scalars);
+    }
+    if (Array.isArray(v.t)) parts.push(`n = ${v.t.length}`);
+    if (!parts.length) parts.push(`${Object.keys(v).length} fields`);
+    return `${key}: ${parts.join(", ")}`;
+  }
+  return formatInfoValue(v);
+}
 const INFO_LABELS = {
   T_halves: "Half-window periods",
   sigma_stat: "σ stat",
@@ -115,6 +148,26 @@ function isInvalidImpact(im) {
 function fitTrackIds() {
   const p = primaryFit();
   return new Set(p && p.track_id ? [p.track_id] : []);
+}
+/** True for a liquid-level job whose primary fit is the draining model. */
+function isDrainingLevelJob() {
+  const lvl = state.result?.level;
+  return Boolean(lvl && lvl.t && lvl.t.length && primaryFit()?.model === "draining");
+}
+/** True when any fit references a real (moving-object) track in state.tracks. */
+function hasFittedMovingTrack() {
+  return (state.fits || []).some((f) => f && f.track_id && state.tracks.has(f.track_id));
+}
+/**
+ * Canonical level series for charts + overlay. `level.h` is always pixels
+ * (see physicam/level.py: h == h_px); metres live in `level.h_m` whenever
+ * `level.unit === "m"`. Using h_m keeps chart and overlay in agreement.
+ * Falls back to `level.h` in its declared unit when h_m is absent.
+ */
+function levelDisplaySeries(level) {
+  if (!level || !level.t || !level.t.length) return null;
+  if (Array.isArray(level.h_m) && level.h_m.length) return { t: level.t, h: level.h_m, unit: "m" };
+  return { t: level.t, h: level.h || [], unit: level.unit === "m" ? "m" : "px" };
 }
 function trackFrameCount(track) {
   return (track?.t?.length ?? track?.frames?.length ?? 0);
@@ -206,6 +259,12 @@ const ICONS = {
 function traceMeta(trace) {
   const name = trace.name || "";
   const kind = trace.kind || "";
+  // Badge audit (agent TOOLS + pipeline traces): SAM 3.1 does track_objects,
+  // measure_level, pre_track and calibrate_reference (image segmentation);
+  // Spark does planning/watch, inspect_frames and finish; Wonder only reports;
+  // everything else (fits, other calibrations, sandbox) runs locally.
+  if (name === "measure_level" || name === "pre_track") return { icon: "track", badge: "SAM" };
+  if (name === "inspect_frames") return { icon: "watch", badge: "SPARK" };
   if (name === "watch_video" || kind === "plan" || name.includes("plan")) return { icon: "watch", badge: "SPARK" };
   if (name.startsWith("track") || name.includes("segment")) return { icon: "track", badge: "SAM" };
   if (name.startsWith("calibrate_reference")) return { icon: "calibrate", badge: "SAM" };
@@ -213,7 +272,7 @@ function traceMeta(trace) {
   if (name.startsWith("fit")) return { icon: "fit", badge: "local" };
   if (name === "run_python") return { icon: "python", badge: "local" };
   if (name === "write_report" || kind === "report") return { icon: "report", badge: "WONDER" };
-  if (name === "finish" || kind === "answer") return { icon: "answer", badge: "SPARK" };
+  if (name === "finish" || name.startsWith("finish") || kind === "answer") return { icon: "answer", badge: "SPARK" };
   return { icon: "plan", badge: kind === "report" ? "WONDER" : "SPARK" };
 }
 
@@ -514,8 +573,15 @@ function fitBlockHtml(fit) {
       return `<tr><td>${esc(name)}</td><td class="num">${cell}</td>` +
         `<td>${esc(p.unit || "")}</td></tr>`;
     }).join("");
-    const infoRows = Object.entries(fit.info || {}).map(([k, v]) =>
-      `<tr><td>${esc(infoLabel(k))}</td><td class="num">${esc(formatInfoValue(v))}</td><td></td></tr>`).join("");
+    const infoRows = Object.entries(fit.info || {}).map(([k, v]) => {
+      if (isShortInfoValue(v)) {
+        return `<tr><td>${esc(infoLabel(k))}</td><td class="num">${esc(formatInfoValue(v))}</td><td></td></tr>`;
+      }
+      let pretty = "";
+      try { pretty = JSON.stringify(v, null, 1); } catch { pretty = String(v); }
+      return `<tr><td>${esc(infoLabel(k))}</td><td class="num diag-summary">${esc(summarizeInfoValue(k, v))}` +
+        `<details class="diag-details"><summary>details</summary><pre>${esc(pretty)}</pre></details></td><td></td></tr>`;
+    }).join("");
     const warnings = (fit.warnings || []).map((w) => `<span class="warn-chip">${esc(w)}</span>`).join("");
     return `<div class="fit-title">${esc(fit.id || "")} · ${esc(fit.model || "")} · track ${esc(fit.track_id || "")}` +
       ` · R² = ${fmt(fit.r2, 4)} · RMSE = ${fmt(fit.rmse_px, 3)} px · n = ${fit.n_points ?? "—"}</div>` +
@@ -583,8 +649,27 @@ function renderCost(cost) {
 function renderLegend() {
   const box = $("track-legend");
   box.innerHTML = "";
+  // Level jobs: a single chip for the level track; the auxiliary SAM tracks
+  // that happen to segment the same liquid are not listed separately.
+  if (isDrainingLevelJob() || (state.result?.level && !hasFittedMovingTrack())) {
+    const tracks = [...state.tracks.values()];
+    const prompt = state.result.level.prompt || "";
+    const track = tracks.find((tr) => tr.label === prompt) || tracks[0];
+    if (track) {
+      const idx = [...state.tracks.keys()].indexOf(track.id);
+      const item = document.createElement("span");
+      item.className = "legend-item";
+      item.innerHTML = `<span class="legend-dot" style="background:${esc(trackColor(track, idx))}"></span>liquid level · ${esc(track.label || track.id)}`;
+      box.appendChild(item);
+    }
+    return;
+  }
+  const seenLabels = new Set();
   let i = 0;
   for (const track of state.tracks.values()) {
+    const labelKey = String(track.label || track.id).trim().toLowerCase();
+    if (seenLabels.has(labelKey)) { i++; continue; }
+    seenLabels.add(labelKey);
     const color = trackColor(track, i);
     if (isHiddenShortTrack(track)) { i++; continue; }
     if (isAuxTrack(track)) {
@@ -683,6 +768,18 @@ function perFrameAffine(track) {
 function renderCharts(cursorT = null) {
   const wrap = $("charts-wrap");
   if (!state.tracks.size) { wrap.hidden = true; return; }
+  // Motion charts (height / x / speed) are meaningless for level jobs: hide
+  // those three cards when there is no fitted moving-object track, or when
+  // this is a draining level job. The restitution card may still show.
+  const hideMotion = !hasFittedMovingTrack() || isDrainingLevelJob() ||
+    Boolean(state.result?.level && primaryFit()?.model === "draining");
+  for (const id of ["chart-y", "chart-x", "chart-speed"]) {
+    const fig = $(id)?.closest(".chart-box");
+    if (fig) fig.hidden = hideMotion;
+  }
+  const barsPre = restitutionBars();
+  wrap.hidden = hideMotion && !barsPre.length;
+  if (wrap.hidden) return;
   wrap.hidden = false;
   const t = cursorT != null ? cursorT : ($("video").currentTime || 0);
   const cal = calibration();
@@ -818,24 +915,25 @@ function renderLevel() {
   const level = state.result?.level;
   if (!level || !level.t || !level.t.length) { if (wrap) wrap.hidden = true; return; }
   wrap.hidden = false;
-  const unit = level.unit === "m" ? "m" : "px";
+  const disp = levelDisplaySeries(level);
+  const unit = disp.unit;
   const tNow = video.currentTime || 0;
   const fit = (state.fits || []).find((f) => f.model === "draining") || primaryFit();
-  const series = [{ x: level.t, y: level.h, color: "#22d3ee", points: true }];
+  const series = [{ x: disp.t, y: disp.h, color: "#22d3ee", points: true }];
   let resid = [];
   if (fit && fit.model === "draining" && fit.curve && fit.curve.t) {
     series.push({ x: fit.curve.t, y: fit.curve.h, color: "#f5b544", width: 1.8 });
-    resid = level.t.map((tt, i) => level.h[i] - interpSeries(fit.curve.t, fit.curve.h, tt));
+    resid = disp.t.map((tt, i) => disp.h[i] - interpSeries(fit.curve.t, fit.curve.h, tt));
     const theory = fit.info && fit.info.theory_curve;
     if (theory && theory.t && theory.h) series.push({ x: theory.t, y: theory.h, color: "#93a5c4", dashed: true, width: 1.4 });
     const val = fit.info && fit.info.validation;
     if (val && val.points && val.points.t) {
-      const h0 = level.h[0];
+      const h0 = disp.h[0];
       series.push({ x: val.points.t, y: val.points.h_norm.map((v) => v * h0), color: "#ff6b6b", points: true, hollow: true });
     }
   }
   drawLineChart($("chart-level"), { series, xLabel: "t (s)", yLabel: `h (${unit})` }, tNow);
-  drawLineChart($("chart-level-resid"), { series: [{ x: level.t, y: resid, color: "#22d3ee", points: true }], xLabel: "t (s)", yLabel: `resid (${unit})` }, tNow);
+  drawLineChart($("chart-level-resid"), { series: [{ x: disp.t, y: resid, color: "#22d3ee", points: true }], xLabel: "t (s)", yLabel: `resid (${unit})` }, tNow);
   // Times-to-drain table.
   const tbody = document.querySelector("#level-times-table tbody");
   const timesWrap = $("level-times-wrap");
@@ -910,13 +1008,16 @@ function drawOverlay() {
   if (lvl && lvl.t && lvl.surface_y) {
     const tL = video.currentTime || 0;
     const sy = interpSeries(lvl.t, lvl.surface_y, tL);
-    const hv = interpSeries(lvl.t, lvl.h, tL);
+    // Same series as the Liquid level chart (h_m in metres when calibrated;
+    // level.h itself is pixels), so the label agrees with the chart.
+    const disp = levelDisplaySeries(lvl);
+    const hv = disp ? interpSeries(disp.t, disp.h, tL) : NaN;
     if (isFinite(sy)) {
       const yPx = geo.oy + sy * geo.scale;
       ctx.save();
       ctx.strokeStyle = "#22d3ee"; ctx.lineWidth = 2; ctx.setLineDash([]);
       ctx.beginPath(); ctx.moveTo(geo.ox, yPx); ctx.lineTo(geo.ox + geo.fw * geo.scale, yPx); ctx.stroke();
-      const hTxt = lvl.unit === "m" && isFinite(hv) ? `h = ${(hv * 100).toFixed(2)} cm`
+      const hTxt = disp && disp.unit === "m" && isFinite(hv) ? `h = ${(hv * 100).toFixed(2)} cm`
         : (isFinite(hv) ? `h = ${hv.toFixed(1)} px` : "");
       if (hTxt) {
         ctx.font = "12px sans-serif";

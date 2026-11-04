@@ -1,38 +1,37 @@
 ## Question
 
-What is the coefficient of restitution of this ball, and what does the throw tell us about $g$?
+What is the coefficient of restitution of this ball, and what does the throw tell us about g?
 
 ## What Physicam saw
 
-A boy throws a small red ball across a tiled room, and it bounces multiple times on the floor. Physicam tracked the red ball over 863 frames from 0.000 s to 3.996 s in a $1280 \times 720$ video recorded at 240.0 fps with a static camera. The footage was backlit, with a dark foreground silhouette and low contrast on the target, making the ball difficult to locate consistently, particularly near segment boundaries.
+A boy throws a small red ball across a tiled room, and the ball bounces multiple times on the floor. The video is 1280 × 720, has 960 frames, lasts 4.000 s, and was recorded at 240.0 fps. Physicam tracked the red ball for 863 frames from 0.000 s to 3.996 s. The camera was static, but the scene was backlit, with a dark foreground silhouette and low contrast on the target. No length reference was available.
 
 ## Method
 
-A bounce model was fitted to the vertical, $y$-direction, motion of the tracked ball. Flight between impacts was modelled as parabolic, constant-acceleration motion, while impacts were identified from changes between successive flight segments. The coefficient of restitution, $e$, was calculated from the vertical speeds immediately before and after impact. Results below use fit f1, covering 0.300 s to 3.996 s and 791 points. No length reference or known ball size was available, and the calibration method was “none”, so distances, speeds, and acceleration remain in pixels.
+The vertical ball position was fitted with a bounce model: parabolic flight between impacts, with the speed reduced at each impact. The selected fit uses 791 points from 0.300 s to 3.996 s. Because calibration used method “none”, with 1.000 m/px nominal scale and 0.000 relative uncertainty in the file, distances, speeds, and acceleration remain in pixel units. Restitution was calculated from the vertical speeds immediately before and after impact, and was also checked against the bounce-height method.
 
 ## Results
 
 | Quantity | Result |
-|---|---:|
+|---|---|
+| Impacts in selected fit | 2 |
 | Valid impact time | 1.538 s |
-| Speed before impact | 3187 px/s |
-| Speed after impact | $-2222$ px/s |
-| Coefficient of restitution, $e$ | $0.70 \pm 0.12$ |
-| Height-based $e$ at same impact | 0.8287 |
-| Pooled $g$ | $4750 \pm 340$ px/s² |
-| Fit $R^2$ | 0.9952 |
+| Speed before valid impact | 3187 px/s |
+| Speed after valid impact | −2222 px/s |
+| Coefficient of restitution, e | 0.70 ± 0.12 |
+| Height-based e at same impact | 0.8287 |
+| Pooled g | 4750 ± 340 px/s² |
+| Segment g values used | 4550 ± 670 px/s²; 4810 ± 390 px/s² |
+| Fit R² | 0.9952 |
 | Fit RMSE | 32.42 px |
-| Impacts in fit f1 | 2.000 |
-| Second, invalid impact time | 2.471 s |
-
-Only the impact at 1.538 s was valid. Segment accelerations were $4550 \pm 670$ px/s² and $4810 \pm 390$ px/s²; another segment, with $600 \pm 1100$ px/s² and $R^2 = 0.5462$, was excluded from the pooled result.
+| Other impact, at 2.471 s, marked invalid | e = 0.25 ± 0.42; height-based e = 0.6117 |
 
 ## Discussion
 
-The valid bounce gives $e = 0.70 \pm 0.12$, meaning the rebound vertical speed was about this fraction of the incoming speed. There is no universal accepted value for $e$, because it depends on the ball and floor. The height-based estimate, 0.8287, differs noticeably from the velocity-based result, indicating sensitivity to the fitted trajectories and impact boundary.
+The only reliable restitution is e = 0.70 ± 0.12 at 1.538 s. It is dimensionless, so it can be interpreted without a length scale: the ball rebounded with about this fraction of its incoming vertical speed. The second fitted impact is not reliable because a neighbouring flight was excluded and the velocity-based and height-based values disagree by more than 0.15, as also seen, to a lesser extent, at the valid impact.
 
-No accepted-value comparison can be made for $g$ in m/s²: without a length scale, $4750 \pm 340$ px/s² cannot be converted to physical units. The throw nevertheless supports approximately constant-acceleration ballistic flight. The high $R^2$ of 0.9952 shows that parabolas describe most vertical motion well, but the 32.42 px RMSE and 5.6% per-segment spread in $g$ reveal substantial residuals. Likely dominant errors are poor target contrast from backlighting, uncertain segment boundaries near impacts, and perspective if the ball moved toward or away from the camera. These problems explain the excluded segment and invalid restitution at 2.471 s, where velocity- and height-based estimates disagreed by more than the reliability threshold stated in the fit warning.
+For g, there is no accepted-value comparison in m/s²: with no known length, 4750 ± 340 px/s² cannot be converted to m/s². The throw does support constant-acceleration ballistic flight, with R² = 0.9952, but the residuals are not negligible at 32.42 px RMSE. Dominant error sources are the low-contrast, backlit tracking, possible perspective as the ball moves toward or away from the camera, and uncertain segment boundaries. This is reflected in the 5.6% per-segment g spread and an excluded segment with g = 600 ± 1100 px/s² and R² = 0.5462.
 
 ## How to measure better next time
 
-Place a clearly visible object of known length in the ball’s plane of motion, light the scene from the camera side, and keep the throw parallel to the image plane. Record a cleaner background, mark the floor contact line, and repeat the throw to test whether $e$ and the per-segment $g$ values agree.
+Include a visible object of known length, or a measured floor-tile dimension, in the ball’s plane so px can be converted to m. Keep the flight as side-on and in one plane as possible, improve foreground lighting and contrast, and ensure each bounce and the following flight are clearly visible so no segment must be excluded.
